@@ -65,7 +65,7 @@ async function reconnect() {
       net = await window.LeverageNet.joinRoom(s.code, read(NAME_KEY) || 'Player', s.token, callbacks);
       return;
     } catch (e) {
-      if (/no open room/i.test(e.message)) break;
+      if (/no open room/i.test(e.message)) break; // the host is gone
     }
   }
   if (session === s) leaveLocally('You lost the connection to the room. The host may have closed it.');

@@ -32,15 +32,38 @@ What that means in practice:
   keep the game in the foreground.
 - **Guests can reload.** A guest who reloads or briefly loses connection rejoins the same
   seat automatically. A guest who leaves mid-game is replaced by a bot.
-- **Some networks block direct connections.** Most home and mobile networks are fine. Some
-  strict office, school or hotel networks block peer-to-peer traffic. If players there
-  can't join, add a TURN server in `PEER_OPTIONS` at the top of `net.js` (Metered, Twilio
-  and Cloudflare all offer them, some with free tiers).
+- **Some networks block direct connections.** Many home and mobile networks are fine, but
+  some routers, office, school and hotel networks block peer-to-peer traffic. A TURN relay
+  fixes this; see "If players can't join" below.
 - **The host could peek.** Each guest only receives their own view, but the host's browser
   holds the whole game, so a host who opens the developer tools could see hidden clues.
   Fine for friends; for strangers you'd want the server version.
 - **The public PeerJS broker is a free shared service.** For a game you expect lots of
-  people to play, you can run your own PeerJS server and point `PEER_OPTIONS` at it.
+  people to play, you can run your own PeerJS server and point the `Peer` options in
+  `net.js` at it.
+
+## If players can't join
+
+The join screen says which step failed:
+
+- **"Couldn't reach the service the game uses to find rooms"**: the PeerJS broker couldn't
+  be reached. Check the internet connection, or try again later in case the free broker is
+  having trouble.
+- **"There's no open room with that code"**: the code is wrong, or the host's page closed.
+- **"Found the room, but couldn't open a connection to the host's browser"**: the most
+  common one. The two networks won't allow a direct connection. Add a relay:
+  1. Make a free account at https://www.metered.ca/tools/openrelay/ (20 GB a month free).
+  2. Create an app and copy its TURN credentials URL. It looks like
+     `https://your-app-name.metered.live/api/v1/turn/credentials?apiKey=...`.
+  3. Paste it into `turnCredentialsUrl` in `config.js` and push the change.
+  The key is visible to anyone who views the page source. That's normal for this kind of
+  free relay key, and the worst case is someone using up your monthly allowance.
+- **"Connected to the host, but their page didn't answer"**: the host may be on an older
+  copy of the site. Have everyone hard-reload the page and make a new room.
+
+For more detail, add `?debug` to the address (for example `index.html?debug`) on both the
+host's and the guest's page, open the browser's developer console, and try again. Every
+connection step is logged.
 
 ## Test it on one computer
 
@@ -61,6 +84,7 @@ doubled cards, nobody ever holds their own clue, every game ends).
 - `game.js`: all the rules, the lobby, turns, timers, bots, and `view()`, which builds what
   one player is allowed to see.
 - `net.js`: hosting and joining rooms over PeerJS, plus the `?net=local` stand-in.
+- `config.js`: optional relay (TURN) settings for players on strict networks.
 - `app.js`: the interface.
 
 Game settings (player counts, round limit, clocks, when duplicate cards start) are in
