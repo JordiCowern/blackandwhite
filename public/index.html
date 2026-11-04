@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Leverage</title>
+<meta name="description" content="A social deduction game of clues, demands and bluffs for 4 to 8 players.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🗂️</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;700;800&family=Courier+Prime:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body data-screen="home">
+
+<!-- Home: pick a name, host or join -->
+<section id="home" class="home">
+  <div class="home-card">
+    <h1 class="wordmark">Leverage</h1>
+    <p class="lede">Everyone at the table has committed a crime. Gather every clue on someone to put them in prison before they do it to you.</p>
+    <label for="nameInput">Screen name</label>
+    <input id="nameInput" maxlength="16" autocomplete="nickname" placeholder="What should people call you?">
+    <div class="home-actions">
+      <div class="home-col">
+        <h2>Host a game</h2>
+        <p>Start a room and share its code.</p>
+        <button class="btn" id="createBtn">Create a room</button>
+      </div>
+      <form class="home-col" id="joinForm">
+        <h2>Join a game</h2>
+        <label for="codeInput">Room code</label>
+        <input id="codeInput" maxlength="5" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="ABCDE" class="code-input">
+        <button class="btn ghost" type="submit">Join room</button>
+      </form>
+    </div>
+    <p class="form-error" id="homeError" role="alert"></p>
+    <button class="linkbtn" data-rules>How to play</button>
+  </div>
+</section>
+
+<!-- Lobby -->
+<section id="lobby" class="lobby" hidden>
+  <div class="lobby-card">
+    <p class="muted">Room code</p>
+    <div class="room-code" id="roomCode"></div>
+    <button class="linkbtn" id="copyLink">Copy invite link</button>
+    <h2 id="playerCount"></h2>
+    <ul class="player-list" id="playerList"></ul>
+    <div id="lobbyControls"></div>
+    <div class="lobby-foot">
+      <button class="linkbtn" data-rules>How to play</button>
+      <button class="linkbtn" data-leave>Leave room</button>
+    </div>
+  </div>
+</section>
+
+<!-- Game -->
+<section id="game" hidden>
+  <div class="top">
+    <span class="wordmark small">Leverage</span>
+    <div class="status" id="status" aria-live="polite"></div>
+    <button class="linkbtn" data-rules>How to play</button>
+    <button class="linkbtn" data-leave>Leave</button>
+  </div>
+  <div class="layout">
+    <main>
+      <div class="tablewrap"><div class="table" id="table"></div></div>
+    </main>
+    <aside class="side">
+      <section class="box"><h2>Your crime</h2><div id="myCrime"></div></section>
+      <section class="box"><h2>Clues you hold</h2><div class="hand" id="hand"></div></section>
+      <section class="box"><h2 id="caseTitle">Case notes</h2><div id="caseNotes"></div></section>
+      <section class="box"><h2>What’s happened</h2><ol class="log" id="log"></ol></section>
+    </aside>
+  </div>
+  <div class="actionbar"><div class="ab" id="actionbar"></div></div>
+</section>
+
+<!-- Decision modal (answer a demand, or decide whether to leak) -->
+<div class="overlay" id="decision" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="dTitle">
+    <h3 id="dTitle"></h3>
+    <p id="dBody"></p>
+    <p class="timer-line">Time left: <span id="dTimer"></span></p>
+    <div id="dBtns"></div>
+  </div>
+</div>
+
+<!-- Rules -->
+<div class="overlay" id="rules" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="rTitle">
+    <h3 id="rTitle">How to play</h3>
+    <ul>
+      <li>Each player has committed a crime, described by four clues: the crime, the crime scene, the motive and a witness. At the start every clue is dealt out evenly, and nobody holds their own.</li>
+      <li>On your turn, tap a suspect at the table. Either take a random clue from them, or demand a specific clue and threaten to leak a clue about them if they refuse.</li>
+      <li>If they refuse, you choose whether to leak a clue about them that you hold. If you hold none, you were bluffing and back down, but nobody can tell which it was.</li>
+      <li>A leaked clue goes on the public record in the middle of the table and counts for everyone.</li>
+      <li>Hold all four clues on someone (counting public ones) and they go to prison. You get half the clues they were holding, and the rest are handed out at random to the other suspects. </li>
+      <li>You can never hold a clue about your own crime. It’s never dealt to you, you can’t demand it or take it at random, and you’re never handed it after an arrest.</li>
+      <li>In games of 6 or more players, two clues about each crime have a second copy, so everyone starts with 6 cards. Holding either copy counts.</li>
+      <li>The last suspect still free wins. If nobody gets there in 25 rounds, whoever came closest to solving a crime wins.</li>
+      <li>Turns have a clock. If time runs out you pass, refuse a demand, or back down.</li>
+    </ul>
+    <button class="btn" id="rulesClose">Got it</button>
+  </div>
+</div>
+
+<div class="toast" id="toast" role="status" hidden></div>
+
+<script src="/app.js"></script>
+</body>
+</html>

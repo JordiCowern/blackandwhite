@@ -1,0 +1,13 @@
+{
+  "name": "leverage",
+  "version": "0.1.0",
+  "description": "Online social deduction game: gather every clue on someone's crime to put them in prison.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/simulate.js"
+  },
+  "engines": { "node": ">=18" },
+  "license": "UNLICENSED",
+  "private": true
+}
