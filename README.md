@@ -1,76 +1,86 @@
 # Leverage
 
-An online social deduction game for 4 to 8 players. Everyone has committed a crime,
-and the four clues to each crime are scattered among the other players. Take clues,
-demand them with threats, bluff, and gather every clue on someone to put them in prison.
-The last suspect still free wins.
+An online social deduction game for 4 to 8 players. Everyone has committed a crime, and
+the clues to each crime are scattered among the other players. Take clues, demand them
+with threats, bluff, and gather every clue on someone to put them in prison. The last
+suspect still free wins.
 
-## Run it locally
+This version is a static site, so it runs on GitHub Pages with no server.
 
-You need Node.js 18 or newer. There are no packages to install.
+## Put it on GitHub Pages
 
-```
-npm start
-```
+1. Create a GitHub repository and upload everything in this folder to it (keep
+   `index.html` at the top level, and keep the empty `.nojekyll` file).
+2. In the repository, open **Settings**, then **Pages**.
+3. Under **Build and deployment**, set **Source** to **Deploy from a branch**, pick your
+   main branch and the **/ (root)** folder, and save.
+4. After a minute or two the site is live at `https://<your-username>.github.io/<repo-name>/`.
 
-Open http://localhost:3000. To test with several players on one computer, open extra
-windows in private/incognito mode (each window needs its own browser storage), or use
-**Add a bot** in the lobby.
+Every file uses relative paths, so it also works from any other static host (Netlify,
+Cloudflare Pages, itch.io) or a subfolder.
 
-## Deploy it
+## How multiplayer works without a server
 
-The server is one Node process that serves the page and the game API on the port in the
-`PORT` environment variable. Any host that runs a long-lived Node app works, for example
-Render, Railway, Fly.io, or a VPS.
+The host's browser runs the room. Every other player connects straight to the host over
+WebRTC, using [PeerJS](https://peerjs.com) and its free public broker to find each other.
+The room code is how guests find the host.
 
-- **Start command:** `npm start` (or `node server.js`)
-- **Health check:** `GET /healthz`
-- **One instance only.** Rooms live in the server's memory, so run a single instance and
-  don't autoscale. Restarting the server ends any games in progress.
-- **Live updates** use server-sent events on `/api/rooms/<code>/events`. Most hosts pass
-  these through. If you put nginx in front, the server already sends
-  `X-Accel-Buffering: no`; also make sure `proxy_read_timeout` is at least 60 seconds.
-- Serverless platforms (Vercel functions, Netlify functions, Lambda) won't work, because
-  they don't keep a process running between requests.
+What that means in practice:
 
-Optional environment variables: `PORT` (default 3000), `HOST` (default 0.0.0.0),
-`MAX_ROOMS` (default 2000).
+- **The host has to keep the page open.** If the host closes or reloads the tab, the room
+  closes for everyone. The page warns the host before they leave. Hosts on a phone should
+  keep the game in the foreground.
+- **Guests can reload.** A guest who reloads or briefly loses connection rejoins the same
+  seat automatically. A guest who leaves mid-game is replaced by a bot.
+- **Some networks block direct connections.** Most home and mobile networks are fine. Some
+  strict office, school or hotel networks block peer-to-peer traffic. If players there
+  can't join, add a TURN server in `PEER_OPTIONS` at the top of `net.js` (Metered, Twilio
+  and Cloudflare all offer them, some with free tiers).
+- **The host could peek.** Each guest only receives their own view, but the host's browser
+  holds the whole game, so a host who opens the developer tools could see hidden clues.
+  Fine for friends; for strangers you'd want the server version.
+- **The public PeerJS broker is a free shared service.** For a game you expect lots of
+  people to play, you can run your own PeerJS server and point `PEER_OPTIONS` at it.
 
-## How the code is laid out
+## Test it on one computer
 
-- `server.js` serves `public/`, creates and joins rooms, takes actions, and streams each
-  player their own view of the game.
-- `game.js` holds all the rules: lobby, dealing, turns, demands, leaks, arrests, timers,
-  win conditions, how an arrest splits the prisoner's hand, bots, and `view()`, which builds what one player is allowed to see.
-  Hidden clues are never sent to anyone who doesn't hold them.
-- `public/` is the client: `index.html`, `style.css`, `app.js`.
-- `test/simulate.js` plays 100 all-bot games and checks that no clue is ever lost or
-  duplicated and that every game ends (`npm test`).
+Open the site in several tabs of the same browser and add `?net=local` to the address in
+each one (for example `index.html?net=local`). Tabs then talk to each other directly inside
+the browser, with no internet needed. Each tab is its own player. **Add a bot** in the lobby
+also fills seats.
 
-## Settings you might want to change
+To run locally, any static file server works, for example `python3 -m http.server` in
+this folder, then open http://localhost:8000/?net=local.
 
-All in `LIMITS` at the top of `game.js`: player counts, the 25-round limit, when duplicate cards kick in (`BIG_GAME_FROM`) and the bigger hand size (`BIG_HAND`), the turn clock
-(60 seconds), the clock for answering a demand (30 seconds) and for deciding whether to leak
-(25 seconds), and how long bots think.
+`node test/simulate.js` plays 200 all-bot games and checks the rules hold (no lost or
+doubled cards, nobody ever holds their own clue, every game ends).
+
+## Files
+
+- `index.html`, `style.css`: the page.
+- `game.js`: all the rules, the lobby, turns, timers, bots, and `view()`, which builds what
+  one player is allowed to see.
+- `net.js`: hosting and joining rooms over PeerJS, plus the `?net=local` stand-in.
+- `app.js`: the interface.
+
+Game settings (player counts, round limit, clocks, when duplicate cards start) are in
+`LIMITS` at the top of `game.js`.
 
 ## Rules as built
 
-- Four clues per player: crime, crime scene, motive and witness. In games of 6 or more
-  players, two clues about each crime get a second copy, so hands start at 6 cards instead
-  of 4. Holding either copy of a clue counts. Nobody is dealt two copies of the same clue.
+- Four clues per player: crime, crime scene, motive and witness. In games of 6 or more,
+  two clues about each crime get a second copy, so hands start at 6 cards instead of 4.
+  Holding either copy counts.
+- Nobody can ever hold a clue about their own crime: it isn't dealt to them, they can't
+  demand it, a random take never picks it, and an arrest never hands it to them.
 - On your turn: take a random clue from a suspect, demand a specific clue (threatening to
   leak a clue about them), or pass.
-- A refused demand: the demander can leak a clue they hold about the target onto the public
-  record, or back down. A demander holding nothing on the target backs down automatically,
-  and other players can't tell the difference.
-- A leaked clue counts for everyone. Holding all four clues on someone, counting public
-  ones, sends them to prison.
-- An arrest splits the prisoner's hand: half (rounded up) goes to the arrester, and the rest
-  is handed out at random to the other suspects still free. Each recipient sees what they
-  got; everyone else only sees the counts.
-- Nobody can ever hold a clue about their own crime: it isn't dealt to them, they can't
-  demand it, a random take never picks it, and an arrest never hands it to them. If a
-  suspect is holding only clues about your crime, you can't take from them at random.
-- When a clock runs out you pass, refuse, or back down. A disconnected player gets an
-  8-second clock until they reconnect. A player who leaves mid-game is replaced by a bot.
-- Last suspect free wins. After 25 rounds, the player closest to completing a crime wins.
+- A refused demand: the demander can leak a clue they hold about the target onto the
+  public record, or back down. A demander with nothing on the target backs down
+  automatically, and nobody else can tell the difference.
+- A leaked clue counts for everyone. Holding every clue on someone, counting public ones,
+  sends them to prison. Half the prisoner's cards (rounded up) go to the arrester and the
+  rest go at random to the other suspects still free.
+- Clocks: 60 seconds per turn, 30 to answer a demand, 25 to decide on a leak. When time
+  runs out you pass, refuse, or back down.
+- Last suspect free wins. After 25 rounds, whoever came closest to solving a crime wins.

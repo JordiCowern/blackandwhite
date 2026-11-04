@@ -5,28 +5,23 @@ const $$ = s => [...document.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const SESSION_KEY = 'leverage:session', NAME_KEY = 'leverage:name';
 
-let session = read(SESSION_KEY);
+
+let session = null;                  // { code, role, token, playerId }
 let state = null;
-let es = null;
+let net = null;                      // the live room connection from net.js
 let offset = 0;        // server clock minus local clock
 let connected = true;
 const ui = { sel: null, demand: null, modalKey: null };
 
-function read(k) { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } }
-function write(k, v) { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, JSON.stringify(v)); } catch {} }
+// The room session lives in sessionStorage, so each tab is its own player and a reload
+// rejoins the same seat. The screen name is remembered across visits in localStorage.
+const store = k => k === SESSION_KEY ? sessionStorage : localStorage;
+function read(k) { try { return JSON.parse(store(k).getItem(k)); } catch { return null; } }
+function write(k, v) { try { v == null ? store(k).removeItem(k) : store(k).setItem(k, JSON.stringify(v)); } catch {} }
 
-async function post(url, body) {
-  let r;
-  try {
-    r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
-  } catch { throw new Error('Can’t reach the server. Check your connection and try again.'); }
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(j.error || 'Something went wrong. Try again.');
-  return j;
-}
 function act(type, extra = {}) {
-  if (!session) return Promise.resolve();
-  return post(`/api/rooms/${session.code}/action`, { token: session.token, type, ...extra }).catch(e => toast(e.message));
+  if (!net) return Promise.resolve();
+  return net.act({ type, ...extra }).catch(e => toast(e.message));
 }
 
 let toastTimer;
@@ -42,40 +37,58 @@ function show(screen) {
 }
 
 /* ---------- connecting ---------- */
-function connect() {
-  if (es) es.close();
-  es = new EventSource(`/api/rooms/${session.code}/events?token=${encodeURIComponent(session.token)}`);
-  es.onmessage = e => {
-    const s = JSON.parse(e.data);
-    offset = s.serverNow - Date.now();
-    state = s;
-    connected = true;
-    render();
-  };
-  es.addEventListener('gone', e => {
-    let d = {};
-    try { d = JSON.parse(e.data); } catch {}
-    leaveLocally(d.message || 'That room has closed.');
-  });
-  es.onerror = () => { connected = false; renderStatus(); };
-  es.onopen = () => { connected = true; renderStatus(); };
+const callbacks = {
+  onView(v) { offset = v.serverNow - Date.now(); state = v; connected = true; render(); },
+  onGone(message) { leaveLocally(message); },
+  onLost() { connected = false; renderStatus(); reconnect(); },
+  onStatus(message) { toast(message); }
+};
+function roomLink(code) {
+  const q = new URLSearchParams({ room: code });
+  if (window.LeverageNet.local) q.set('net', 'local');
+  return `${location.origin}${location.pathname}?${q}`;
+}
+function setUrl(code) {
+  const q = new URLSearchParams();
+  if (code) q.set('room', code);
+  if (window.LeverageNet.local) q.set('net', 'local');
+  const s = q.toString();
+  history.replaceState(null, '', location.pathname + (s ? '?' + s : ''));
+}
+async function reconnect() {
+  if (!session || session.role !== 'guest') return leaveLocally('You lost the connection to the room.');
+  const s = session;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    await new Promise(r => setTimeout(r, attempt ? 2500 : 600));
+    if (session !== s) return;
+    try {
+      net = await window.LeverageNet.joinRoom(s.code, read(NAME_KEY) || 'Player', s.token, callbacks);
+      return;
+    } catch (e) {
+      if (/no open room/i.test(e.message)) break;
+    }
+  }
+  if (session === s) leaveLocally('You lost the connection to the room. The host may have closed it.');
 }
 function leaveLocally(message) {
-  if (es) { es.close(); es = null; }
+  if (net) { try { net.close(); } catch {} net = null; }
   session = null; state = null; ui.sel = null; ui.demand = null; ui.modalKey = null;
   write(SESSION_KEY, null);
   $('#decision').hidden = true;
-  history.replaceState(null, '', location.pathname);
+  setUrl(null);
   show('home');
   $('#homeError').textContent = message || '';
 }
-function enterRoom(res) {
-  session = { code: res.code, token: res.token, playerId: res.playerId };
+function enterRoom(handle) {
+  net = handle;
+  session = { code: handle.code, role: handle.role, token: handle.token || null, playerId: handle.playerId };
   write(SESSION_KEY, session);
-  history.replaceState(null, '', `?room=${res.code}`);
+  setUrl(handle.code);
   $('#homeError').textContent = '';
-  connect();
 }
+window.addEventListener('beforeunload', e => {
+  if (session && session.role === 'host') { e.preventDefault(); e.returnValue = ''; }
+});
 
 /* ---------- home ---------- */
 function getName() {
@@ -87,7 +100,8 @@ function getName() {
 $('#createBtn').onclick = async () => {
   const name = getName(); if (!name) return;
   const b = $('#createBtn'); b.disabled = true;
-  try { enterRoom(await post('/api/rooms', { name })); }
+  $('#homeError').textContent = 'Opening a room…';
+  try { enterRoom(await window.LeverageNet.createHost(name, callbacks)); }
   catch (e) { $('#homeError').textContent = e.message; }
   finally { b.disabled = false; }
 };
@@ -96,8 +110,11 @@ $('#joinForm').onsubmit = async e => {
   const name = getName(); if (!name) return;
   const code = $('#codeInput').value.trim().toUpperCase();
   if (!/^[A-Z]{5}$/.test(code)) { $('#homeError').textContent = 'Room codes are five letters.'; $('#codeInput').focus(); return; }
-  try { enterRoom(await post(`/api/rooms/${code}/join`, { name })); }
+  const b = e.submitter; if (b) b.disabled = true;
+  $('#homeError').textContent = 'Connecting to the room…';
+  try { enterRoom(await window.LeverageNet.joinRoom(code, name, null, callbacks)); }
   catch (err) { $('#homeError').textContent = err.message; }
+  finally { if (b) b.disabled = false; }
 };
 $('#codeInput').addEventListener('input', e => { e.target.value = e.target.value.toUpperCase().replace(/[^A-Z]/g, ''); });
 
@@ -106,12 +123,14 @@ $$('[data-rules]').forEach(b => b.onclick = () => { $('#rules').hidden = false; 
 $('#rulesClose').onclick = () => { $('#rules').hidden = true; };
 $$('[data-leave]').forEach(b => b.onclick = async () => {
   if (!session) return;
-  if (state && state.phase === 'playing' && !confirm('Leave the game? A bot will take over your seat.')) return;
+  if (session.role === 'host') {
+    if (!confirm('Close the room? It ends the game for everyone, because the room runs in your browser.')) return;
+  } else if (state && state.phase === 'playing' && !confirm('Leave the game? A bot will take over your seat.')) return;
   await act('leave');
   leaveLocally('');
 });
 $('#copyLink').onclick = async () => {
-  const link = `${location.origin}${location.pathname}?room=${state.code}`;
+  const link = roomLink(state.code);
   try { await navigator.clipboard.writeText(link); toast('Invite link copied.'); }
   catch { toast(link); }
 };
@@ -145,6 +164,7 @@ function renderStatus() {
 
 function renderLobby() {
   $('#roomCode').textContent = state.code;
+  $('#hostNote').hidden = !(session && session.role === 'host');
   const n = state.players.length, { min, max } = state.limits;
   $('#playerCount').textContent = `Players (${n} of ${max})`;
   $('#playerList').innerHTML = state.players.map(p => `
@@ -380,10 +400,21 @@ function tick() {
 setInterval(tick, 250);
 
 /* ---------- start up ---------- */
+session = read(SESSION_KEY);
 const params = new URLSearchParams(location.search);
 const urlCode = (params.get('room') || '').toUpperCase().replace(/[^A-Z]/g, '').slice(0, 5);
 $('#nameInput').value = read(NAME_KEY) || '';
 $('#codeInput').value = urlCode;
-if (session && (!urlCode || urlCode === session.code)) connect();
-else { if (session) write(SESSION_KEY, null); session = null; show('home'); }
+show('home');
+if (session && session.role === 'guest' && urlCode === session.code) {
+  $('#homeError').textContent = 'Reconnecting to your room…';
+  window.LeverageNet.joinRoom(session.code, read(NAME_KEY) || 'Player', session.token, callbacks)
+    .then(h => { enterRoom(h); })
+    .catch(() => { write(SESSION_KEY, null); session = null; $('#homeError').textContent = 'That room isn’t open anymore.'; });
+} else if (session && session.role === 'host') {
+  write(SESSION_KEY, null); session = null;
+  $('#homeError').textContent = 'Your last room closed when you left the page.';
+  $('#codeInput').value = '';
+  setUrl(null);
+} else if (session) { write(SESSION_KEY, null); session = null; }
 })();

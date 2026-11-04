@@ -9,7 +9,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;700;800&family=Courier+Prime:wght@400;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="style.css">
 </head>
 <body data-screen="home">
 
@@ -47,6 +47,7 @@
     <h2 id="playerCount"></h2>
     <ul class="player-list" id="playerList"></ul>
     <div id="lobbyControls"></div>
+    <p class="lobby-note" id="hostNote" hidden>The room runs in your browser, so keep this page open until the game ends. If you close it, the room closes for everyone.</p>
     <div class="lobby-foot">
       <button class="linkbtn" data-rules>How to play</button>
       <button class="linkbtn" data-leave>Leave room</button>
@@ -100,6 +101,7 @@
       <li>In games of 6 or more players, two clues about each crime have a second copy, so everyone starts with 6 cards. Holding either copy counts.</li>
       <li>The last suspect still free wins. If nobody gets there in 25 rounds, whoever came closest to solving a crime wins.</li>
       <li>Turns have a clock. If time runs out you pass, refuse a demand, or back down.</li>
+      <li>The game runs in the host’s browser. If the host closes their page, the room closes for everyone.</li>
     </ul>
     <button class="btn" id="rulesClose">Got it</button>
   </div>
@@ -107,6 +109,9 @@
 
 <div class="toast" id="toast" role="status" hidden></div>
 
-<script src="/app.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script src="game.js"></script>
+<script src="net.js"></script>
+<script src="app.js"></script>
 </body>
 </html>

@@ -1,7 +1,8 @@
+// Game rules and room state. The host's browser runs this and owns all state; each
+// player only ever receives the view built for them by Room.view(), so hidden clues
+// stay hidden. Also loads in Node for the simulation test.
+(function () {
 'use strict';
-// Game rules and room state. The server owns all state; each player only ever
-// receives the view built for them by Room.view(), so hidden clues stay hidden.
-const crypto = require('crypto');
 
 const TRAITS = ['Crime', 'Crime scene', 'Motive', 'Witness'];
 // Each pool needs at least MAX_PLAYERS entries so no two players share a value.
@@ -28,7 +29,11 @@ const LIMITS = {
 
 const rnd = a => a[Math.floor(Math.random() * a.length)];
 function shuffle(a) { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
-const newId = (bytes = 6) => crypto.randomBytes(bytes).toString('base64url');
+const newId = (bytes = 6) => {
+  const a = new Uint8Array(bytes);
+  globalThis.crypto.getRandomValues(a);
+  return Array.from(a, b => b.toString(16).padStart(2, '0')).join('');
+};
 function userError(msg) { const e = new Error(msg); e.userFacing = true; return e; }
 function cleanName(name) {
   return String(name || '').replace(/[\u0000-\u001f\u007f<>]/g, '').replace(/\s+/g, ' ').trim().slice(0, 16);
@@ -550,4 +555,7 @@ class Room {
   }
 }
 
-module.exports = { Room, LIMITS, TRAITS, cleanName, userError };
+const api = { Room, LIMITS, TRAITS, cleanName, userError };
+if (typeof module !== 'undefined' && module.exports) module.exports = api;
+else globalThis.LeverageGame = api;
+})();
