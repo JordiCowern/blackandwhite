@@ -92,7 +92,8 @@ label{display:block;font-size:.86rem;color:var(--muted);margin-top:14px}
 @media (max-width:620px){.latest{font-size:.82rem}.record{max-height:5.5em}}
 
 /* seats */
-.seat{position:absolute;transform:translate(-50%,-50%);display:flex;flex-direction:column;align-items:center;gap:4px;width:136px;background:none;border:0;padding:0;font:inherit;color:inherit;cursor:pointer}
+.seat-wrap{position:absolute;transform:translate(-50%,-50%)}
+.seat{position:relative;display:flex;flex-direction:column;align-items:center;gap:4px;width:136px;background:none;border:0;padding:0;font:inherit;color:inherit;cursor:pointer}
 .seat.you,.seat:disabled{cursor:default}
 .seat:focus-visible{outline:none}
 .seat:focus-visible .avatar{outline:3px solid var(--mine);outline-offset:3px}
@@ -113,6 +114,10 @@ label{display:block;font-size:.86rem;color:var(--muted);margin-top:14px}
 .seat.away .avatar{border-style:dashed}
 .stamp{position:absolute;top:44%;left:50%;transform:translate(-50%,-50%) rotate(-11deg);border:3px solid var(--stamp);color:var(--stamp);background:var(--surface);padding:2px 10px;font-weight:800;font-size:1.05rem;border-radius:4px;white-space:nowrap}
 .table.crowded .seat{width:112px}
+.arrest{position:absolute;left:50%;top:-34px;transform:translateX(-50%);z-index:3;font:inherit;font-weight:800;font-size:.82rem;background:var(--stamp);color:#fff;border:0;border-radius:999px;padding:6px 14px;cursor:pointer;white-space:nowrap;box-shadow:0 3px 0 rgba(0,0,0,.25)}
+.arrest:disabled{opacity:.6;cursor:default}
+.arrest:focus-visible{outline:3px solid var(--mine);outline-offset:2px}
+.ab-info span.ready{display:block;color:var(--stamp);font-weight:700;margin-top:2px}
 .table.crowded .avatar{width:54px;height:54px;font-size:1.25rem}
 .table.crowded .plate{min-width:100px;padding:4px 7px}
 .m-short{display:none!important}
@@ -131,6 +136,7 @@ label{display:block;font-size:.86rem;color:var(--muted);margin-top:14px}
   .plate b{font-size:.84rem}
   .plate small{font-size:.68rem}
   .tag{font-size:.64rem;padding:1px 6px}
+  .arrest{font-size:.7rem;padding:4px 9px;top:-26px}
   .dot{width:8px;height:8px}
 }
 

@@ -218,6 +218,11 @@ function renderTable(g) {
   const t = $('#table');
   t.classList.toggle('crowded', n >= 6);
   t.innerHTML = `<div class="center"><h2>Public record</h2>${pub}<div class="latest">${esc(latest)}</div></div>${seats}`;
+  t.querySelectorAll('[data-arrest]').forEach(b => b.onclick = e => {
+    e.stopPropagation();
+    b.disabled = true;
+    act('arrest', { target: b.dataset.arrest });
+  });
   t.querySelectorAll('button.seat').forEach(b => b.onclick = () => {
     const id = b.dataset.pid;
     ui.sel = ui.sel === id ? null : id;
@@ -246,8 +251,10 @@ function seatHTML(s, x, y, g) {
     <span class="plate"><b>${esc(mine ? 'You' : p.name)}</b><small class="m-long">${meta}</small><small class="m-short">${short}</small>${dots}</span>
     ${s.alive ? '' : '<span class="stamp">Imprisoned</span>'}`;
   const style = `style="left:${x.toFixed(2)}%;top:${y.toFixed(2)}%"`;
-  if (mine) return `<div class="${cls}" ${style}>${inner}</div>`;
-  return `<button class="${cls}" ${style} data-pid="${esc(s.id)}" aria-pressed="${ui.sel === s.id}" aria-label="${esc(p.name)}" ${s.alive ? '' : 'disabled'}>${inner}</button>`;
+  const arrest = s.canArrest && state.phase === 'playing'
+    ? `<button class="arrest" data-arrest="${esc(s.id)}" aria-label="Imprison ${esc(p.name)}">Imprison</button>` : '';
+  if (mine) return `<div class="seat-wrap" ${style}><div class="${cls}">${inner}</div></div>`;
+  return `<div class="seat-wrap" ${style}>${arrest}<button class="${cls}" data-pid="${esc(s.id)}" aria-pressed="${ui.sel === s.id}" aria-label="${esc(p.name)}" ${s.alive ? '' : 'disabled'}>${inner}</button></div>`;
 }
 
 function slotHTML(trait, valueHTML) { return `<div class="slot"><span class="t">${esc(trait)}</span><span>${valueHTML}</span></div>`; }
@@ -330,19 +337,21 @@ function renderBar(g) {
     info = `<b>Your turn ${clock(g.deadline)}</b><span>Tap a suspect at the table to target them.</span>`;
   } else {
     const lev = g.myHand.filter(c => c.owner === t && !g.public.some(p => p.cid === c.cid)).length;
-    const noTake = tSeat && !tSeat.takeable && tSeat.hand ? ` Everything ${esc(pinfo(t).name)} holds is about your crime, so there’s nothing to take.` : '';
+    const noTake = tSeat && !tSeat.takeable && tSeat.hand ? ` ${esc(pinfo(t).name)} has nothing new you can copy.` : '';
     const name = pinfo(t).name;
     info = `<b>Target: ${esc(name)} ${clock(g.deadline)}</b><span class="${lev ? '' : 'bluff'}">${lev
       ? `You hold ${lev} clue${lev === 1 ? '' : 's'} on ${esc(name)}, so a threat is real.`
       : `You hold nothing on ${esc(name)}. A threat would be a bluff.`}${noTake}</span>`;
   }
+  const ready = g.seats.filter(s => s.canArrest).map(s => pinfo(s.id).name);
+  if (ready.length) info += `<span class="ready">You have every clue on ${esc(ready.join(' and '))}. Press Imprison above ${ready.length === 1 ? 'them' : 'a suspect'} whenever you like.</span>`;
   const can = myTurn && t;
   const opts = can ? demandOptions(g) : '';
   bar.innerHTML = `<div class="ab-info">${info}</div>
     <div class="ab-controls">
       <select id="demandSel" aria-label="Clue to demand" ${can && opts ? '' : 'disabled'}>${opts || '<option>Choose a clue to demand</option>'}</select>
       <button class="act demand" id="demBtn" ${can && opts ? '' : 'disabled'}>Demand</button>
-      <button class="act" id="randBtn" ${can && tSeat && tSeat.takeable ? '' : 'disabled'}>Take random</button>
+      <button class="act" id="randBtn" ${can && tSeat && tSeat.takeable ? '' : 'disabled'}>Copy random</button>
       <button class="act ghost" id="passBtn" ${myTurn ? '' : 'disabled'}>Pass</button>
     </div>`;
   const sel = $('#demandSel');

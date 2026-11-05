@@ -93,11 +93,11 @@
     <h3 id="rTitle">How to play</h3>
     <ul>
       <li>Each player has committed a crime, described by four clues: the crime, the crime scene, the motive and a witness. At the start every clue is dealt out evenly, and nobody holds their own.</li>
-      <li>On your turn, tap a suspect at the table. Either take a random clue from them, or demand a specific clue and threaten to leak a clue about them if they refuse.</li>
+      <li>On your turn, tap a suspect at the table. Either copy a random clue from them (they keep theirs, and you get a copy), or demand a specific clue and threaten to leak a clue about them if they refuse. A demanded clue that’s handed over leaves their hand.</li>
       <li>If they refuse, you choose whether to leak a clue about them that you hold. If you hold none, you were bluffing and back down, but nobody can tell which it was.</li>
       <li>A leaked clue goes on the public record in the middle of the table and counts for everyone.</li>
-      <li>Hold all four clues on someone (counting public ones) and they go to prison. You get half the clues they were holding, and the rest are handed out at random to the other suspects. </li>
-      <li>You can never hold a clue about your own crime. It’s never dealt to you, you can’t demand it or take it at random, and you’re never handed it after an arrest.</li>
+      <li>Once you hold all four clues on someone (counting public ones), an Imprison button appears above them. Press it whenever you like, even on someone else’s turn. You get half the clues they were holding, and the rest are handed out at random to the other suspects. Bots imprison at the start of their own turn.</li>
+      <li>You can never hold a clue about your own crime. It’s never dealt to you, you can’t demand it or copy it, and you’re never handed it after an arrest.</li>
       <li>In games of 6 or more players, two clues about each crime have a second copy, so everyone starts with 6 cards. Holding either copy counts.</li>
       <li>The last suspect still free wins. If nobody gets there in 25 rounds, whoever came closest to solving a crime wins.</li>
       <li>Turns have a clock. If time runs out you pass, refuse a demand, or back down.</li>
@@ -109,7 +109,7 @@
 
 <div class="toast" id="toast" role="status" hidden></div>
 
-<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js"></script>
 <script src="config.js"></script>
 <script src="game.js"></script>
 <script src="net.js"></script>

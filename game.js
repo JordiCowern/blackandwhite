@@ -22,7 +22,8 @@ const LIMITS = {
   RESPOND_MS: 30000,  // time to answer a demand
   FOLLOW_MS: 25000,   // time to decide whether to leak after a refusal
   AWAY_MS: 8000,      // shorter clock when the player who must act is disconnected
-  BOT_MS: 1500,       // how long bots "think"
+  BOT_MS: 3500,       // how long bots "think" before taking a turn
+  BOT_RESPOND_MS: 2500, // how long bots take to answer a demand or decide on a leak
   BIG_GAME_FROM: 6,   // games with at least this many players use duplicate clue cards
   BIG_HAND: 6         // starting hand size in those games (4 clues + 2 second copies per crime)
 };
@@ -151,6 +152,7 @@ class Room {
       case 'pass': this.requireTurn(pid); this.pass(pid, false); break;
       case 'respond': this.cmdRespond(pid, !!msg.comply); break;
       case 'follow': this.cmdFollow(pid, msg.clue); break;
+      case 'arrest': this.cmdArrest(pid, msg.target); break;
       default: throw userError('Unknown action.');
     }
     this.lastActive = Date.now();
@@ -220,7 +222,12 @@ class Room {
   holds(pid, clue) { return this.cardFor(pid, clue) !== undefined; }
   has(pid, clue) { return this.holds(pid, clue) || this.g.pub.has(clue); }
   progress(pid, x) { return this.S(x).secrets.filter(c => this.has(pid, c)).length; }
-  takeable(a, t) { return this.S(t).hand.filter(cd => this.ownerOfCard(cd) !== a); }
+  // Cards a random copy could come from: not about the taker's own crime, not a clue the
+  // taker already holds, and not already public.
+  takeable(a, t) {
+    return this.S(t).hand.filter(cd => { const c = this.clueOf(cd); return this.K(c).owner !== a && !this.holds(a, c) && !this.g.pub.has(c); });
+  }
+  canArrest(p, x) { return p !== x && this.S(p).alive && this.S(x).alive && this.S(x).secrets.every(c => this.has(p, c)); }
   leverage(a, t) { return [...new Set(this.S(a).hand.map(cd => this.clueOf(cd)).filter(c => this.K(c).owner === t && !this.g.pub.has(c)))]; }
   alive() { return this.g.order.filter(pid => this.S(pid).alive); }
   current() { return this.g.order[this.g.turnIdx]; }
@@ -244,7 +251,7 @@ class Room {
   }
   cmdRandom(pid, t) {
     this.requireTurn(pid); this.requireTarget(pid, t);
-    if (!this.takeable(pid, t).length) throw userError('They aren’t holding anything you can take.');
+    if (!this.takeable(pid, t).length) throw userError('They aren’t holding anything new you can copy.');
     this.doRandom(pid, t);
   }
   cmdDemand(pid, t, clue) {
@@ -262,6 +269,13 @@ class Room {
     if (this.phase !== 'playing' || !pd || pd.type !== 'respond' || pd.target !== pid) throw userError('Nobody is waiting on you.');
     this.resolveRespond(comply, false);
   }
+  cmdArrest(pid, x) {
+    if (this.phase !== 'playing' || !this.g) throw userError('The game isn’t running.');
+    if (!this.g.st[pid] || !this.S(pid).alive) throw userError('You’re in prison.');
+    if (!this.g.st[x] || x === pid || !this.S(x).alive) throw userError('Pick a suspect who isn’t in prison.');
+    if (!this.canArrest(pid, x)) throw userError('You don’t have every clue on their crime yet.');
+    this.arrest(pid, x);
+  }
   cmdFollow(pid, clue) {
     const pd = this.g && this.g.pending;
     if (this.phase !== 'playing' || !pd || pd.type !== 'follow' || pd.actor !== pid) throw userError('Nobody is waiting on you.');
@@ -274,16 +288,19 @@ class Room {
   }
 
   /* ---------- actions ---------- */
+  // A random take copies the clue: the target keeps their card and the taker gets a duplicate.
   doRandom(a, t) {
     const card = rnd(this.takeable(a, t));
     const clue = this.clueOf(card);
-    this.move(card, t, a);
+    const copy = { id: this.g.cards.length, clue };
+    this.g.cards.push(copy);
+    this.S(a).hand.push(copy.id);
     this.S(t).know[clue] = a;
     const c = this.K(clue);
-    this.tag(a, 'Took a clue');
-    this.log('', v => v === a ? `You take a random clue from ${this.name(t)}: ${this.lbl(clue, v)}, “${c.value}”.`
-      : v === t ? `${this.name(a)} takes a random clue from you: ${this.lbl(clue, v)}, “${c.value}”.`
-      : `${this.name(a)} takes a random clue from ${this.name(t)}.`);
+    this.tag(a, 'Copied a clue');
+    this.log('', v => v === a ? `You copy a random clue from ${this.name(t)}: ${this.lbl(clue, v)}, “${c.value}”.`
+      : v === t ? `${this.name(a)} copies a random clue from you: ${this.lbl(clue, v)}, “${c.value}”. You keep your card.`
+      : `${this.name(a)} copies a random clue from ${this.name(t)}.`);
     this.endTurn(a);
   }
   doDemand(a, t, clue) {
@@ -344,7 +361,6 @@ class Room {
   }
   endTurn(a) {
     this.g.pending = null;
-    this.checkArrests(a);
     if (this.checkEnd()) return;
     this.advance();
   }
@@ -358,39 +374,32 @@ class Room {
   }
 
   /* ---------- win and lose ---------- */
-  checkArrests(actor) {
-    const g = this.g;
-    let changed = true;
-    while (changed && this.alive().length > 1) {
-      changed = false;
-      const order = [actor, ...g.order.filter(p => p !== actor)];
-      outer: for (const x of this.alive()) {
-        for (const p of order) {
-          if (p === x || !this.S(p).alive) continue;
-          if (this.S(x).secrets.every(c => this.has(p, c))) {
-            const sx = this.S(x);
-            sx.alive = false;
-            const taken = sx.hand.splice(0);
-            this.everyone(s => taken.forEach(cd => { const c = this.clueOf(cd); if (s.know[c] === x) delete s.know[c]; }));
-            const split = this.splitHand(taken, p, x);
-            sx.tag = 'In prison';
-            this.tag(p, 'Made an arrest');
-            const n = taken.length, kept = (split.get(p) || []).length, given = [...split.values()].reduce((s, a) => s + a.length, 0), rest = given - kept;
-            this.log('elim', v => {
-              let t = `${this.nm(p, v)} ${this.vb(p, v, 'have', 'has')} every clue on ${this.pos(x, v)} crime. ${this.nm(x, v)} ${this.vb(x, v, 'go', 'goes')} to prison.`;
-              if (!n) return t;
-              t += ` ${this.nm(p, v)} ${this.vb(p, v, 'take', 'takes')} ${kept} of the ${n} clue${n === 1 ? '' : 's'} ${x === v ? 'you were' : 'they were'} holding`;
-              return t + (rest ? `, and the other ${rest} ${rest === 1 ? 'is' : 'are'} handed out among the other suspects.` : '.');
-            });
-            for (const [pid, cds] of split) {
-              this.log('', v => v === pid ? `From ${this.pos(x, v)} hand you receive ${cds.map(cd => { const c = this.clueOf(cd); return `${this.lbl(c, v)} (“${this.K(c).value}”)`; }).join(', ')}.` : null);
-            }
-            changed = true;
-            break outer;
-          }
-        }
-      }
+  // Imprisoning is never automatic. Once someone holds every clue on a suspect (counting
+  // public ones), they can imprison them at any moment, even on someone else's turn.
+  arrest(p, x) {
+    const g = this.g, sx = this.S(x);
+    sx.alive = false;
+    const taken = sx.hand.splice(0);
+    this.everyone(s => taken.forEach(cd => { const c = this.clueOf(cd); if (s.know[c] === x) delete s.know[c]; }));
+    const split = this.splitHand(taken, p, x);
+    sx.tag = 'In prison';
+    this.tag(p, 'Made an arrest');
+    const n = taken.length, kept = (split.get(p) || []).length;
+    const rest = [...split.values()].reduce((s, a) => s + a.length, 0) - kept;
+    this.log('elim', v => {
+      let t = `${this.nm(p, v)} ${this.vb(p, v, 'put', 'puts')} ${x === v ? 'you' : this.name(x)} in prison, holding every clue on ${this.pos(x, v)} crime.`;
+      if (!n) return t;
+      t += ` ${this.nm(p, v)} ${this.vb(p, v, 'take', 'takes')} ${kept} of the ${n} clue${n === 1 ? '' : 's'} ${x === v ? 'you were' : 'they were'} holding`;
+      return t + (rest ? `, and the other ${rest} ${rest === 1 ? 'is' : 'are'} handed out among the other suspects.` : '.');
+    });
+    for (const [pid, cds] of split) {
+      this.log('', v => v === pid ? `From ${this.pos(x, v)} hand you receive ${cds.map(cd => { const c = this.clueOf(cd); return `${this.lbl(c, v)} (“${this.K(c).value}”)`; }).join(', ')}.` : null);
     }
+    if (this.checkEnd()) return;
+    const pd = g.pending;
+    const cancelled = !!pd && (pd.actor === x || pd.target === x);
+    if (cancelled) { g.pending = null; this.log('', () => 'The demand is called off.'); }
+    if (cancelled || this.current() === x) this.advance(); // the interrupted turn ends
   }
   // An arrest hands out the prisoner's cards: half (rounded up) to the arrester, the
   // rest at random to the other suspects still free. Nobody ever receives a card about
@@ -458,7 +467,7 @@ class Room {
     const p = this.P(who);
     const isBot = !p || p.bot;
     const now = Date.now();
-    if (isBot) ms = LIMITS.BOT_MS; else if (!p.conns) ms = LIMITS.AWAY_MS;
+    if (isBot) ms = pd ? LIMITS.BOT_RESPOND_MS : LIMITS.BOT_MS; else if (!p.conns) ms = LIMITS.AWAY_MS;
     let deadline = now + ms;
     // Same decision as before (e.g. a reconnect): never extend the clock.
     if (this.schedStep === this.step && g.deadline && g.waitingOn === who && !isBot) deadline = Math.min(g.deadline, deadline);
@@ -489,6 +498,13 @@ class Room {
     return pHas * severity + (Math.random() - 0.5) > cost;
   }
   botTurn(b) {
+    // Bots imprison whoever they can at the start of their own turn, which gives human
+    // players a fair window to get there first.
+    for (const x of this.alive()) {
+      if (this.phase !== 'playing') return;
+      if (this.canArrest(b, x)) this.arrest(b, x);
+    }
+    if (this.phase !== 'playing' || this.current() !== b) return;
     const s = this.S(b);
     const others = this.alive().filter(p => p !== b);
     const locatedAt = c => { const k = s.know[c]; return k != null && k !== b && this.S(k).alive && !this.g.pub.has(c); };
@@ -532,7 +548,12 @@ class Room {
       deadline: g.deadline, waitingOn: g.waitingOn,
       seats: g.order.map(pid => {
         const s = this.S(pid);
-        return { id: pid, alive: s.alive, hand: s.hand.length, tag: s.tag, progress: pid === v ? null : this.progress(v, pid), takeable: pid === v ? null : this.takeable(v, pid).length > 0 };
+        return {
+          id: pid, alive: s.alive, hand: s.hand.length, tag: s.tag,
+          progress: pid === v ? null : this.progress(v, pid),
+          takeable: pid === v ? null : this.takeable(v, pid).length > 0,
+          canArrest: pid !== v && this.canArrest(v, pid)
+        };
       }),
       myCrime: me.secrets.map(c => { const k = this.K(c); return { cid: c, trait: k.trait, value: k.value, status: g.pub.has(c) ? 'public' : 'out', seenWith: seen(c) }; }),
       myHand: [...counts].map(([c, copies]) => ({ ...clueInfo(c), copies, ownerFree: this.S(this.K(c).owner).alive })),
@@ -548,7 +569,7 @@ class Room {
         options: pd.type === 'follow' && pd.actor === v ? pd.options.map(clueInfo) : undefined,
         outThere: pd.type === 'respond' && pd.target === v ? me.secrets.filter(x => !g.pub.has(x)).length : undefined
       } : null,
-      log: g.log.slice(-150).map(e => ({ kind: e.kind, text: e.fn(v) })).filter(e => e.text),
+      log: g.log.slice(-100).map(e => ({ kind: e.kind, text: e.fn(v) })).filter(e => e.text),
       end: g.end
     };
     return base;

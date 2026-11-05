@@ -1,152 +1,213 @@
-// Networking for a static site. GitHub Pages can't run a server, so the host's
-// browser runs the room (game.js) and every guest connects straight to the host
-// over WebRTC, using PeerJS and its free public broker to find each other.
-// Add ?net=local to the URL to use a same-browser stand-in instead (for testing
-// with several tabs, no internet needed).
+// Networking for a static site. GitHub Pages can't run a server, so the host's browser
+// runs the room (game.js), and players exchange messages through a public MQTT message
+// service over ordinary secure WebSockets. That avoids the direct browser-to-browser
+// connections that many networks block.
+//
+// Anyone can read a public MQTT service, so every message after the room's public key
+// is end-to-end encrypted: each guest agrees a private key with the host (ECDH P-256)
+// and messages are sealed with AES-GCM. Other people can't read hidden clues off the wire.
+//
+// Add ?net=local to the URL to use a same-browser stand-in instead (for testing with
+// several tabs, no internet needed). Add ?debug to log every connection step.
 (function () {
 'use strict';
-const PREFIX = 'leverage-room-';           // namespaces our ids on the shared PeerJS broker (ids are lowercase)
-const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
 const params = new URLSearchParams(location.search);
 const LOCAL = params.get('net') === 'local';
-const DEBUG = params.has('debug');         // add ?debug to the URL to log every connection step
+const DEBUG = params.has('debug');
 const log = (...a) => { if (DEBUG) console.log('[net]', ...a); };
-const peerId = code => PREFIX + code.toLowerCase();
-
-// STUN servers let browsers find a direct route to each other. The PeerJS relays are
-// the ones PeerJS uses by default; your own relay from config.js is added in front.
-const BASE_ICE = [
-  { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
-  { urls: 'stun:stun.cloudflare.com:3478' },
-  { urls: ['turn:eu-0.turn.peerjs.com:3478', 'turn:us-0.turn.peerjs.com:3478'], username: 'peerjs', credential: 'peerjsp' }
-];
-let iceCache = null;
-async function iceServers() {
-  if (iceCache) return iceCache;
-  const cfg = window.LEVERAGE_CONFIG || {};
-  let relay = [];
-  if (cfg.turnCredentialsUrl) {
-    try {
-      const r = await fetch(cfg.turnCredentialsUrl);
-      if (r.ok) relay = await r.json();
-      log('relay servers from config', relay);
-    } catch (e) { console.warn('[net] could not load TURN credentials', e); }
-  }
-  iceCache = [...relay, ...(cfg.extraIceServers || []), ...BASE_ICE];
-  return iceCache;
-}
-
+const CFG = window.LEVERAGE_CONFIG || {};
+const BROKERS = (CFG.brokers && CFG.brokers.length) ? CFG.brokers : ['wss://broker.emqx.io:8084/mqtt', 'wss://broker.hivemq.com:8884/mqtt'];
+const BASE = 'leverage-game/v3/';
+const T = { key: c => `${BASE}${c}/key`, host: c => `${BASE}${c}/host`, to: (c, id) => `${BASE}${c}/to/${id}` };
+const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+const enc = new TextEncoder(), dec = new TextDecoder();
 const MSG = {
-  broker: 'Couldn’t reach the service the game uses to find rooms. Check your internet connection and try again in a minute.',
-  direct: 'Found the room, but couldn’t open a connection to the host’s browser. One of your networks is probably blocking direct connections. Try a different network (a phone hotspot works for a quick check), or set up the free relay described in the README.',
-  hello: 'Connected to the host, but their page didn’t answer. Ask the host to reload the site and make a new room.',
-  missing: 'There’s no open room with that code. Check it, or ask the host whether the room is still open.'
+  broker: 'Couldn’t reach the message service the game uses. Check your internet connection and try again in a minute.',
+  missing: 'There’s no open room with that code. Check it, or ask the host whether the room is still open.',
+  hello: 'Found the room, but the host’s page didn’t answer. Ask the host to reload the site and make a new room.',
+  lib: 'The connection library didn’t load. Check your internet connection and reload the page.',
+  secure: 'This page has to be opened over https to connect.'
 };
 
-function makeCode() {
-  const a = new Uint8Array(5);
-  crypto.getRandomValues(a);
-  return Array.from(a, b => CODE_CHARS[b % CODE_CHARS.length]).join('');
+function makeCode() { const a = crypto.getRandomValues(new Uint8Array(5)); return Array.from(a, b => CODE_CHARS[b % CODE_CHARS.length]).join(''); }
+function randId(n = 10) { return Array.from(crypto.getRandomValues(new Uint8Array(n)), b => b.toString(16).padStart(2, '0')).join(''); }
+function lib() { if (LOCAL) return localMqtt; if (!window.mqtt || !window.mqtt.connect) throw new Error(MSG.lib); return window.mqtt; }
+const parse = p => { try { const s = typeof p === 'string' ? p : dec.decode(p); return s ? JSON.parse(s) : null; } catch { return null; } };
+// Runs async jobs one at a time, in order.
+function serial() { let p = Promise.resolve(); return fn => { p = p.then(fn).catch(e => console.warn('[net]', e)); }; }
+
+/* ---------- encryption ---------- */
+const ECDH = { name: 'ECDH', namedCurve: 'P-256' };
+const b64 = bytes => { let s = ''; for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000)); return btoa(s); };
+const unb64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+async function newKeys() {
+  if (!crypto.subtle) throw new Error(MSG.secure);
+  const kp = await crypto.subtle.generateKey(ECDH, true, ['deriveKey']);
+  return { kp, pub: await crypto.subtle.exportKey('jwk', kp.publicKey) };
 }
-async function newPeer(id) {
-  if (LOCAL) return new LocalPeer(id);
-  if (typeof window.Peer !== 'function') throw new Error('The connection library didn’t load. Check your internet connection and reload the page.');
-  const options = { debug: DEBUG ? 3 : 1, config: { iceServers: await iceServers() } };
-  return id ? new window.Peer(id, options) : new window.Peer(options);
+async function sharedKey(kp, jwk) {
+  const other = await crypto.subtle.importKey('jwk', jwk, ECDH, false, []);
+  return crypto.subtle.deriveKey({ name: 'ECDH', public: other }, kp.privateKey, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
 }
-function friendly(e) {
-  const t = e && e.type;
-  if (t === 'browser-incompatible') return 'This browser can’t make peer-to-peer connections. Try a current version of Chrome, Firefox, Safari or Edge.';
-  if (t === 'network' || t === 'server-error' || t === 'socket-error' || t === 'socket-closed') return 'Can’t reach the connection service. Check your internet connection and try again.';
-  return (e && e.message) || 'Something went wrong with the connection. Try again.';
+async function seal(key, obj) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, enc.encode(JSON.stringify(obj))));
+  return { iv: b64(iv), d: b64(ct) };
 }
-async function openPeer(id) {
-  const peer = await newPeer(id);
+async function unseal(key, m) {
+  const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(m.iv) }, key, unb64(m.d));
+  return JSON.parse(dec.decode(pt));
+}
+const sameKey = (a, b) => !!a && !!b && a.x === b.x && a.y === b.y;
+
+/* ---------- message service helpers ---------- */
+function connect(url, extra) {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => { peer.destroy(); reject(new Error(MSG.broker)); }, 12000);
-    const onErr = e => { clearTimeout(timer); peer.destroy(); reject(e); };
-    peer.on('open', pid => { clearTimeout(timer); log('host registered as', pid); peer.off && peer.off('error', onErr); resolve(peer); });
-    peer.on('error', onErr);
+    let client, done = false;
+    try {
+      client = lib().connect(url, { clean: true, keepalive: 20, reconnectPeriod: 2000, connectTimeout: 8000, clientId: 'lev_' + randId(8), ...extra });
+    } catch (e) { return reject(e); }
+    const timer = setTimeout(() => { if (done) return; done = true; try { client.end(true); } catch {} reject(new Error(MSG.broker)); }, 9000);
+    client.on('connect', () => { if (done) return; done = true; clearTimeout(timer); log('connected to', url); resolve(client); });
+    client.on('error', e => {
+      log('service error', url, e && e.message);
+      if (done) return;
+      done = true; clearTimeout(timer); try { client.end(true); } catch {}
+      reject(new Error(MSG.broker));
+    });
   });
 }
-function safeSend(conn, msg) { try { if (conn.open) conn.send(msg); } catch (e) { console.warn('[net] send failed', e); } }
+function subscribe(client, topic) { return new Promise((res, rej) => client.subscribe(topic, { qos: 1 }, e => e ? rej(e) : res())); }
+function publish(client, topic, obj, opts) { client.publish(topic, obj == null ? '' : JSON.stringify(obj), { qos: 1, ...(opts || {}) }); }
+// A room exists when its key topic holds a retained public key.
+function peekRoom(client, code, ms) {
+  return new Promise(resolve => {
+    let done = false;
+    const topic = T.key(code);
+    const finish = v => { if (done) return; done = true; client.removeListener('message', onMsg); resolve(v); };
+    const onMsg = (t, p) => { if (t !== topic) return; const m = parse(p); if (m && m.pub) finish(m); };
+    client.on('message', onMsg);
+    subscribe(client, topic).catch(() => {});
+    setTimeout(() => finish(null), ms);
+  });
+}
 
 /* ---------- host ---------- */
 async function createHost(name, cb) {
   const { Room, cleanName } = window.LeverageGame;
   if (!cleanName(name)) throw new Error('Pick a screen name first.');
-  let peer = null, code = null;
-  for (let i = 0; i < 5 && !peer; i++) {
-    code = makeCode();
-    try { peer = await openPeer(peerId(code)); }
-    catch (e) { if (!e || e.type !== 'unavailable-id') throw new Error(friendly(e)); }
+  const keys = await newKeys();
+  let client = null, code = null, url = null;
+  for (const u of BROKERS) {
+    // Pick an unused code with a plain probe connection first, so a "will" can never
+    // touch someone else's room.
+    let probe;
+    try { probe = await connect(u, {}); } catch { log('could not use', u); continue; }
+    let free = null;
+    for (let i = 0; i < 4 && !free; i++) { const c0 = makeCode(); if (!(await peekRoom(probe, c0, 1200))) free = c0; }
+    try { probe.end(false); } catch {}
+    if (!free) continue;
+    // If the host's page vanishes, the service clears the room's key (the "will").
+    try { client = await connect(u, { will: { topic: T.key(free), payload: '', retain: true, qos: 1 } }); }
+    catch { log('could not use', u); continue; }
+    code = free; url = u;
+    break;
   }
-  if (!peer) throw new Error('Couldn’t find a free room code. Try again.');
+  if (!client) throw new Error(MSG.broker);
+  log('hosting', code, 'on', url);
 
-  const conns = new Map(); // DataConnection -> player id (null until they say hello)
-  let me = null, closed = false;
+  const sessions = new Map(); // guest client id -> { key, jwk, pid, last, online, out, wantState }
+  const inbox = serial();
+  let me = null, closed = false, flushTimer = null;
+
+  function send(s, gid, obj) {
+    s.out(async () => { publish(client, T.to(code, gid), await seal(s.key, obj)); });
+  }
+  function flush() {
+    flushTimer = null;
+    for (const [gid, s] of sessions) if (s.wantState && s.pid && s.online) { s.wantState = false; send(s, gid, { t: 'state', view: room.view(s.pid) }); }
+  }
   const room = new Room(code, () => {
-    for (const [c, pid] of conns) if (pid) safeSend(c, { t: 'state', view: room.view(pid) });
+    for (const s of sessions.values()) s.wantState = true;
+    if (!flushTimer) flushTimer = setTimeout(flush, 0); // send one up-to-date view, not one per change
     if (me) cb.onView(room.view(me.id));
   });
   room.onRemove = (pid, message) => setTimeout(() => {
-    for (const [c, p] of conns) {
-      if (p !== pid) continue;
-      safeSend(c, { t: 'gone', message });
-      conns.delete(c);
-      setTimeout(() => c.close(), 400);
+    for (const [gid, s] of sessions) {
+      if (s.pid !== pid) continue;
+      send(s, gid, { t: 'gone', message });
+      s.online = false; s.pid = null;
+      s.out(() => { sessions.delete(gid); });
     }
   }, 0);
   me = room.join(name);
   room.setConn(me.id, 1);
 
-  peer.on('connection', conn => {
-    log('guest connecting', conn.peer);
-    conns.set(conn, null);
-    conn.on('open', () => log('guest connection open', conn.peer));
-    conn.on('iceStateChanged', s => log('guest connection state', conn.peer, s));
-    conn.on('data', d => onData(conn, d));
-    conn.on('close', () => {
-      const pid = conns.get(conn);
-      conns.delete(conn);
-      if (pid && !closed) room.setConn(pid, -1);
-    });
-    conn.on('error', e => console.warn('[net] guest connection error', e));
+  publish(client, T.key(code), { pub: keys.pub, v: 3 }, { retain: true });
+  await subscribe(client, T.host(code));
+  client.on('message', (t, p) => {
+    if (t !== T.host(code) || closed) return;
+    const m = parse(p);
+    if (m && typeof m.f === 'string') inbox(() => handle(m));
   });
-  peer.on('disconnected', () => { if (!closed) peer.reconnect(); }); // lost the broker; open games keep working
-  peer.on('error', e => { console.warn('[net] host error', e); if (cb.onStatus) cb.onStatus(friendly(e)); });
+  client.on('connect', () => { if (!closed) { log('reconnected'); publish(client, T.key(code), { pub: keys.pub, v: 3 }, { retain: true }); } });
+  client.on('offline', () => { if (!closed && cb.onStatus) cb.onStatus('Lost the connection to the message service. Reconnecting…'); });
 
-  function onData(conn, d) {
-    if (!d || typeof d !== 'object' || closed) return;
-    if (d.t === 'hello') {
-      try {
-        let p = room.byToken(d.token);
-        if (!p) p = room.join(d.name);
-        conns.set(conn, p.id);
-        safeSend(conn, { t: 'welcome', playerId: p.id, token: p.token });
-        room.setConn(p.id, 1); // sends this guest their first view
-      } catch (e) {
-        safeSend(conn, { t: 'refused', message: e.userFacing ? e.message : 'The host couldn’t add you to the room.' });
-        setTimeout(() => conn.close(), 400);
-      }
+  async function handle(m) {
+    if (m.t === 'bye') { // a guest's page closed
+      const s = sessions.get(m.f);
+      if (s && s.online && s.pid) { s.online = false; room.setConn(s.pid, -1); }
       return;
     }
-    if (d.t === 'action') {
-      const pid = conns.get(conn);
-      if (!pid) return;
-      try { room.handle(pid, d.msg || {}); safeSend(conn, { t: 'result', id: d.id }); }
+    let s = sessions.get(m.f);
+    if (m.k && (!s || !sameKey(s.jwk, m.k))) {
+      if (s && s.online && s.pid) room.setConn(s.pid, -1);
+      s = { key: await sharedKey(keys.kp, m.k), jwk: m.k, pid: null, last: Date.now(), online: false, out: serial(), wantState: false };
+      sessions.set(m.f, s);
+    }
+    if (!s) return;
+    let body;
+    try { body = await unseal(s.key, m); } catch { return; }
+    s.last = Date.now();
+    if (body.t === 'hello') {
+      try {
+        let p = room.byToken(body.token);
+        if (!p) p = room.join(body.name);
+        for (const [gid, o] of sessions) if (o !== s && o.pid === p.id) { if (o.online) room.setConn(p.id, -1); sessions.delete(gid); }
+        const already = s.online && s.pid === p.id;
+        s.pid = p.id;
+        send(s, m.f, { t: 'welcome', playerId: p.id, token: p.token });
+        if (already) { s.wantState = true; flush(); } else { s.online = true; room.setConn(p.id, 1); }
+      } catch (e) {
+        send(s, m.f, { t: 'refused', message: e.userFacing ? e.message : 'The host couldn’t add you to the room.' });
+      }
+    } else if (body.t === 'ping') {
+      if (!s.pid) return;
+      const p = room.P(s.pid);
+      if (!s.online && p && !p.left) { s.online = true; room.setConn(s.pid, 1); }
+      send(s, m.f, { t: 'pong' });
+    } else if (body.t === 'action') {
+      if (!s.pid) return;
+      try { room.handle(s.pid, body.msg || {}); send(s, m.f, { t: 'result', id: body.id }); }
       catch (e) {
         if (!e.userFacing) console.error('[game]', e);
-        safeSend(conn, { t: 'result', id: d.id, error: e.userFacing ? e.message : 'Something went wrong. Try again.' });
+        send(s, m.f, { t: 'result', id: body.id, error: e.userFacing ? e.message : 'Something went wrong. Try again.' });
       }
     }
   }
+  // Guests ping every few seconds; one that goes quiet is shown as offline.
+  const sweep = setInterval(() => {
+    const now = Date.now();
+    for (const s of sessions.values()) if (s.online && s.pid && now - s.last > 15000) { s.online = false; room.setConn(s.pid, -1); }
+  }, 3000);
+
   function close(message) {
     if (closed) return;
     closed = true;
-    for (const c of conns.keys()) safeSend(c, { t: 'gone', message: message || 'The host closed the room.' });
+    clearInterval(sweep);
+    for (const [gid, s] of sessions) if (s.pid) send(s, gid, { t: 'gone', message: message || 'The host closed the room.' });
     room.destroy();
-    setTimeout(() => { try { peer.destroy(); } catch {} }, 400);
+    setTimeout(() => { try { publish(client, T.key(code), null, { retain: true }); client.end(false); } catch {} }, 400);
   }
   window.addEventListener('pagehide', () => close('The host left the page, so the room closed.'));
 
@@ -162,128 +223,113 @@ async function createHost(name, cb) {
 }
 
 /* ---------- guest ---------- */
-// Joining goes through three steps, each with its own time limit and message, so a
-// failure says where it broke: reaching the broker, connecting to the host, or the
-// host answering.
-function joinRoom(code, name, token, cb) {
+async function joinRoom(code, name, token, cb) {
+  const keys = await newKeys();
+  const myId = randId(10);
+  let client = null, roomKey = null, reached = false;
+  for (const u of BROKERS) {
+    let c;
+    try { c = await connect(u, { will: { topic: T.host(code), payload: JSON.stringify({ f: myId, t: 'bye' }), qos: 0, retain: false } }); }
+    catch { log('could not use', u); continue; }
+    reached = true;
+    const k = await peekRoom(c, code, 3000);
+    if (k) { client = c; roomKey = k; log('found room', code, 'on', u); break; }
+    c.end(true);
+  }
+  if (!client) throw new Error(reached ? MSG.missing : MSG.broker);
+  const key = await sharedKey(keys.kp, roomKey.pub);
+  await subscribe(client, T.to(code, myId));
+
   return new Promise((resolve, reject) => {
-    let settled = false, gone = false, conn = null, peer = null, seq = 0, timer = null;
-    const pending = new Map();
-    const fail = msg => {
-      if (settled) return;
-      settled = true; clearTimeout(timer);
-      log('join failed:', msg);
-      reject(new Error(msg));
-      try { peer && peer.destroy(); } catch {}
-    };
-    const step = (name, ms, msg) => { log('step:', name); clearTimeout(timer); timer = setTimeout(() => fail(msg), ms); };
-    step('reaching the broker', 12000, MSG.broker);
-    newPeer().then(p => {
-      peer = p;
-      peer.on('error', e => {
-        log('peer error', e && e.type, e);
-        if (e && e.type === 'peer-unavailable') fail(MSG.missing);
-        else if (!settled) fail(friendly(e));
+    let settled = false, gone = false, seq = 0, lastHeard = Date.now();
+    const pending = new Map(), inbox = serial(), out = serial();
+    const send = obj => out(async () => publish(client, T.host(code), { f: myId, ...(await seal(key, obj)) }));
+    const stop = () => { clearInterval(ping); clearInterval(watch); try { client.end(false); } catch {} };
+    const fail = msg => { if (settled) return; settled = true; clearTimeout(timer); stop(); log('join failed:', msg); reject(new Error(msg)); };
+    const end = (fn, arg) => { if (gone) return; gone = true; stop(); fn(arg); };
+    const timer = setTimeout(() => fail(MSG.hello), 10000);
+
+    client.on('message', (t, p) => {
+      if (t === T.key(code)) {
+        const m = parse(p);
+        if (!m || !m.pub || !sameKey(m.pub, roomKey.pub)) { if (!settled) fail(MSG.missing); else end(cb.onGone, 'The host closed the room.'); }
+        return;
+      }
+      if (t !== T.to(code, myId)) return;
+      const m = parse(p);
+      if (!m) return;
+      inbox(async () => {
+        let d;
+        try { d = await unseal(key, m); } catch { return; }
+        lastHeard = Date.now();
+        if (d.t === 'welcome') { if (settled) return; settled = true; clearTimeout(timer); log('joined'); resolve(api(d)); }
+        else if (d.t === 'refused') fail(d.message);
+        else if (d.t === 'state') cb.onView(d.view);
+        else if (d.t === 'result') {
+          const q = pending.get(d.id);
+          if (q) { pending.delete(d.id); d.error ? q.reject(new Error(d.error)) : q.resolve(); }
+        } else if (d.t === 'gone') end(cb.onGone, d.message);
       });
-      peer.on('open', id => {
-        log('registered with broker as', id);
-        step('connecting to the host', 20000, MSG.direct);
-        conn = peer.connect(peerId(code), { reliable: true, serialization: 'json' });
-        conn.on('iceStateChanged', s => { log('connection state', s); if (s === 'failed') fail(MSG.direct); });
-        conn.on('error', e => { log('connection error', e); if (!settled) fail(MSG.direct); });
-        conn.on('open', () => {
-          step('waiting for the host to answer', 8000, MSG.hello);
-          conn.send({ t: 'hello', name, token });
-        });
-        conn.on('data', d => {
-          if (!d || typeof d !== 'object') return;
-          if (d.t === 'welcome') { if (settled) return; settled = true; clearTimeout(timer); log('joined'); resolve(api(d)); }
-          else if (d.t === 'refused') fail(d.message);
-          else if (d.t === 'state') cb.onView(d.view);
-          else if (d.t === 'result') {
-            const q = pending.get(d.id);
-            if (q) { pending.delete(d.id); d.error ? q.reject(new Error(d.error)) : q.resolve(); }
-          } else if (d.t === 'gone') { gone = true; cb.onGone(d.message); setTimeout(() => peer.destroy(), 100); }
-        });
-        conn.on('close', () => {
-          log('connection closed');
-          if (!settled) fail(MSG.direct);
-          else if (!gone) { gone = true; try { peer.destroy(); } catch {} cb.onLost(); }
-        });
-      });
-    }).catch(e => fail(e.message || MSG.broker));
+    });
+    client.on('connect', () => { if (settled && !gone) send({ t: 'ping' }); });
+    const ping = setInterval(() => { if (settled && !gone) send({ t: 'ping' }); }, 5000);
+    const watch = setInterval(() => { if (settled && !gone && Date.now() - lastHeard > 20000) end(cb.onLost); }, 2000);
+
+    out(async () => publish(client, T.host(code), { f: myId, k: keys.pub, ...(await seal(key, { t: 'hello', name, token })) }));
 
     function api(w) {
       return {
         code, playerId: w.playerId, token: w.token, role: 'guest',
         act(msg) {
           return new Promise((res, rej) => {
-            if (!conn || !conn.open) return rej(new Error('You’re not connected to the room right now.'));
+            if (gone) return rej(new Error('You’re not connected to the room right now.'));
             const id = ++seq;
             pending.set(id, { resolve: res, reject: rej });
-            conn.send({ t: 'action', id, msg });
+            send({ t: 'action', id, msg });
             setTimeout(() => { if (pending.has(id)) { pending.delete(id); rej(new Error('The host didn’t answer. Try again.')); } }, 8000);
           });
         },
-        close() { gone = true; try { peer.destroy(); } catch {} }
+        close() { if (!gone) { gone = true; stop(); } }
       };
     }
   });
 }
 
-/* ---------- same-browser stand-in for PeerJS (?net=local) ---------- */
+/* ---------- same-browser stand-in for the message service (?net=local) ---------- */
 class Emitter {
   constructor() { this.h = {}; }
   on(ev, f) { (this.h[ev] = this.h[ev] || []).push(f); return this; }
-  off(ev, f) { this.h[ev] = (this.h[ev] || []).filter(x => x !== f); return this; }
+  removeListener(ev, f) { this.h[ev] = (this.h[ev] || []).filter(x => x !== f); return this; }
   emit(ev, ...a) { (this.h[ev] || []).slice().forEach(f => f(...a)); }
 }
-class LocalPeer extends Emitter {
-  constructor(id) {
-    super();
-    this.id = id || 'peer-' + Math.random().toString(36).slice(2);
-    this.conns = {};
-    this.bc = new BroadcastChannel('leverage-local-net');
-    this.bc.onmessage = e => this.receive(e.data);
-    setTimeout(() => this.emit('open', this.id), 30);
-  }
-  connect(to) {
-    const c = new LocalConn(this, to, Math.random().toString(36).slice(2));
-    this.conns[c.cid] = c;
-    this.bc.postMessage({ k: 'open?', to, from: this.id, cid: c.cid });
-    c.timer = setTimeout(() => { if (!c.open) this.emit('error', { type: 'peer-unavailable' }); }, 1000);
+const localMqtt = {
+  connect(url, opts) {
+    const RET = 'leverage-local-retained:';
+    const c = new Emitter();
+    const subs = new Set();
+    const ch = new BroadcastChannel('leverage-local-mqtt');
+    let ended = false;
+    const deliver = (topic, payload) => { if (subs.has(topic)) setTimeout(() => c.emit('message', topic, enc.encode(payload)), 0); };
+    ch.onmessage = e => deliver(e.data.topic, e.data.payload);
+    c.subscribe = (topic, o, cb) => {
+      subs.add(topic); if (cb) cb(null);
+      const r = localStorage.getItem(RET + topic);
+      if (r) deliver(topic, r);
+    };
+    c.publish = (topic, payload, o = {}) => {
+      if (ended) return;
+      payload = String(payload || '');
+      if (o.retain) { if (payload) localStorage.setItem(RET + topic, payload); else localStorage.removeItem(RET + topic); }
+      ch.postMessage({ topic, payload });
+      deliver(topic, payload);
+    };
+    const will = () => { if (!ended && opts.will) { c.publish(opts.will.topic, opts.will.payload, { retain: opts.will.retain }); } ended = true; };
+    window.addEventListener('pagehide', will);
+    c.end = () => { ended = true; window.removeEventListener('pagehide', will); setTimeout(() => ch.close(), 50); c.emit('close'); };
+    setTimeout(() => c.emit('connect'), 20);
     return c;
   }
-  receive(m) {
-    if (m.to !== this.id) return;
-    if (m.k === 'open?') {
-      const c = new LocalConn(this, m.from, m.cid);
-      c.open = true; this.conns[m.cid] = c;
-      this.emit('connection', c);
-      this.bc.postMessage({ k: 'open!', to: m.from, cid: m.cid });
-      setTimeout(() => c.emit('open'), 0);
-      return;
-    }
-    const c = this.conns[m.cid];
-    if (!c) return;
-    if (m.k === 'open!') { clearTimeout(c.timer); c.open = true; c.emit('open'); }
-    else if (m.k === 'data') c.emit('data', m.d);
-    else if (m.k === 'close') { c.open = false; delete this.conns[m.cid]; c.emit('close'); }
-  }
-  reconnect() {}
-  destroy() { Object.values(this.conns).forEach(c => c.close()); setTimeout(() => this.bc.close(), 50); }
-}
-class LocalConn extends Emitter {
-  constructor(peer, remote, cid) { super(); this.peer = peer; this.peerId = remote; this.cid = cid; this.open = false; }
-  send(d) { this.peer.bc.postMessage({ k: 'data', to: this.peerId, cid: this.cid, d: JSON.parse(JSON.stringify(d)) }); }
-  close() {
-    if (!this.open) return;
-    this.open = false;
-    this.peer.bc.postMessage({ k: 'close', to: this.peerId, cid: this.cid });
-    delete this.peer.conns[this.cid];
-    this.emit('close');
-  }
-}
+};
 
 window.LeverageNet = { createHost, joinRoom, local: LOCAL };
 })();
