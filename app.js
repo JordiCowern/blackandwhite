@@ -72,7 +72,7 @@ async function reconnect() {
 }
 function leaveLocally(message) {
   if (net) { try { net.close(); } catch {} net = null; }
-  session = null; state = null; ui.sel = null; ui.demand = null; ui.modalKey = null;
+  session = null; state = null; ui.sel = null; ui.demand = null; ui.modalKey = null; ui.lastEvent = null; ui.logLen = null;
   write(SESSION_KEY, null);
   $('#decision').hidden = true;
   setUrl(null);
@@ -148,7 +148,7 @@ const clock = deadline => deadline ? `<span class="clock" data-deadline="${deadl
 /* ---------- render ---------- */
 function render() {
   if (!state) return;
-  if (state.phase === 'lobby') { show('lobby'); renderLobby(); $('#decision').hidden = true; ui.modalKey = null; }
+  if (state.phase === 'lobby') { show('lobby'); renderLobby(); $('#decision').hidden = true; ui.modalKey = null; ui.lastEvent = null; ui.logLen = null; }
   else { show('game'); renderGame(); }
   tick();
 }
@@ -199,7 +199,85 @@ function renderGame() {
   renderSide(g);
   renderBar(g);
   renderDecision(g);
+  animateEvents(g);
 }
+/* ---------- animations ---------- */
+// The host sends a short list of table events (who gave a card to whom). New ones play
+// as cards flying between seats, drawn on a layer above the page so re-rendering the
+// table doesn't cut them off.
+const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+function animateEvents(g) {
+  const evs = g.events || [];
+  const last = evs.length ? evs[evs.length - 1].id : 0;
+  if (ui.lastEvent == null || last < ui.lastEvent) { ui.lastEvent = last; return; } // first view, or a new game
+  const fresh = evs.filter(e => e.id > ui.lastEvent);
+  ui.lastEvent = last;
+  let delay = 0;
+  for (const e of fresh) { setTimeout(() => playEvent(e), delay); delay += e.type === 'deal' ? 350 : 200; }
+}
+function spot(id) {
+  const el = id === 'public' ? document.querySelector('#table .center h2') : document.querySelector(`.seat-wrap[data-seat="${CSS.escape(id)}"] .avatar`);
+  if (!el) return null;
+  const r = el.getBoundingClientRect();
+  return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+}
+function fxEl(cls, text) { const d = document.createElement('div'); d.className = cls; if (text) d.textContent = text; $('#fx').appendChild(d); return d; }
+function play(el, frames, opts) { const anim = el.animate(frames, { fill: 'both', ...opts }); anim.onfinish = () => el.remove(); }
+function fly(from, to, cls, text, delay = 0) {
+  const a = spot(from), b = spot(to);
+  if (!a || !b) return;
+  const el = fxEl('flycard' + (cls ? ' ' + cls : ''), text);
+  const rot = (Math.random() * 16 - 8).toFixed(1);
+  play(el, [
+    { transform: `translate(${a.x}px,${a.y}px) scale(.5)`, opacity: 0 },
+    { transform: `translate(${a.x}px,${a.y}px) scale(1)`, opacity: 1, offset: .15 },
+    { transform: `translate(${b.x}px,${b.y}px) scale(1) rotate(${rot}deg)`, opacity: 1, offset: .85 },
+    { transform: `translate(${b.x}px,${b.y}px) scale(.6) rotate(${rot}deg)`, opacity: 0 }
+  ], { duration: reduceMotion.matches ? 1 : 1000, delay, easing: 'cubic-bezier(.3,.7,.25,1)' });
+}
+function ring(id, cls, delay = 0) {
+  const p = spot(id);
+  if (!p || reduceMotion.matches) return;
+  play(fxEl('ring' + (cls ? ' ' + cls : '')), [
+    { transform: `translate(${p.x}px,${p.y}px) scale(.8)`, opacity: .9 },
+    { transform: `translate(${p.x}px,${p.y}px) scale(1.7)`, opacity: 0 }
+  ], { duration: 800, delay, easing: 'ease-out' });
+}
+function label(id, text) {
+  const p = spot(id);
+  if (!p) return;
+  const at = dy => `translate(${p.x}px,${p.y - dy}px) translate(-50%,-50%)`;
+  play(fxEl('fx-label', text), [
+    { transform: `${at(40)} scale(.8)`, opacity: 0 },
+    { transform: `${at(52)} scale(1)`, opacity: 1, offset: .2 },
+    { transform: `${at(58)} scale(1)`, opacity: 1, offset: .8 },
+    { transform: `${at(64)} scale(1)`, opacity: 0 }
+  ], { duration: 1500 });
+}
+function beam(from, to) {
+  const a = spot(from), b = spot(to);
+  if (!a || !b || reduceMotion.matches) return;
+  const el = fxEl('beam');
+  el.style.width = `${Math.hypot(b.x - a.x, b.y - a.y)}px`;
+  const base = `translate(${a.x}px,${a.y}px) rotate(${Math.atan2(b.y - a.y, b.x - a.x)}rad)`;
+  play(el, [
+    { transform: `${base} scaleX(0)`, opacity: 1 },
+    { transform: `${base} scaleX(1)`, opacity: 1, offset: .4 },
+    { transform: `${base} scaleX(1)`, opacity: 0 }
+  ], { duration: 900, easing: 'ease-out' });
+}
+function playEvent(e) {
+  switch (e.type) {
+    case 'copy': ring(e.from, 'mine'); fly(e.from, e.to, 'copy'); break; // the target keeps theirs, so a copy flies
+    case 'give': fly(e.from, e.to); break;
+    case 'demand': beam(e.from, e.to); ring(e.to); label(e.to, 'Demand'); break;
+    case 'refuse': label(e.from, 'Refused'); break;
+    case 'leak': fly(e.from, 'public', 'leak', e.value); break;
+    case 'arrest': ring(e.to); ring(e.to, '', 250); label(e.to, 'Imprisoned'); break;
+    case 'deal': for (let i = 0; i < e.n; i++) fly(e.from, e.to, '', '', i * 140); break;
+  }
+}
+
 
 function renderTable(g) {
   const order = g.seats.map(s => s.id);
@@ -253,8 +331,8 @@ function seatHTML(s, x, y, g) {
   const style = `style="left:${x.toFixed(2)}%;top:${y.toFixed(2)}%"`;
   const arrest = s.canArrest && state.phase === 'playing'
     ? `<button class="arrest" data-arrest="${esc(s.id)}" aria-label="Imprison ${esc(p.name)}">Imprison</button>` : '';
-  if (mine) return `<div class="seat-wrap" ${style}><div class="${cls}">${inner}</div></div>`;
-  return `<div class="seat-wrap" ${style}>${arrest}<button class="${cls}" data-pid="${esc(s.id)}" aria-pressed="${ui.sel === s.id}" aria-label="${esc(p.name)}" ${s.alive ? '' : 'disabled'}>${inner}</button></div>`;
+  if (mine) return `<div class="seat-wrap" data-seat="${esc(s.id)}" ${style}><div class="${cls}">${inner}</div></div>`;
+  return `<div class="seat-wrap" data-seat="${esc(s.id)}" ${style}>${arrest}<button class="${cls}" data-pid="${esc(s.id)}" aria-pressed="${ui.sel === s.id}" aria-label="${esc(p.name)}" ${s.alive ? '' : 'disabled'}>${inner}</button></div>`;
 }
 
 function slotHTML(trait, valueHTML) { return `<div class="slot"><span class="t">${esc(trait)}</span><span>${valueHTML}</span></div>`; }
@@ -266,26 +344,29 @@ function renderSide(g) {
     return slotHTML(c.trait, `<span class="val">${esc(c.value)}</span><span class="hint">${where}</span>`);
   }).join('');
 
-  $('#hand').innerHTML = g.myHand.length ? g.myHand.map(c =>
-    `<div class="card${!c.ownerFree ? ' gone' : ''}"><b>${esc(clueLabel(c.owner, c.trait).replace(/^./, x => x.toUpperCase()))}${c.copies > 1 ? ` (${c.copies} copies)` : ''}</b><span class="val">${esc(c.value)}</span>${!c.ownerFree ? '<span class="hint">Already in prison</span>' : ''}</div>`
-  ).join('') : '<p class="empty">You’re holding no clues. Take one from someone to get started.</p>';
-
-  if (ui.sel) {
-    const name = pinfo(ui.sel).name;
-    $('#caseTitle').textContent = `Case notes on ${name}`;
-    $('#caseNotes').innerHTML = g.cases[ui.sel].map((c, i) => {
+  // Case notes on every suspect; the one you've tapped comes first. Tapping a heading
+  // selects that suspect, like tapping their seat.
+  const others = g.seats.filter(s => s.id !== me());
+  const ordered = [...others.filter(s => s.id === ui.sel), ...others.filter(s => s.id !== ui.sel && s.alive), ...others.filter(s => s.id !== ui.sel && !s.alive)];
+  $('#caseNotes').innerHTML = ordered.map(s => {
+    const name = pinfo(s.id).name;
+    const count = s.alive ? `${s.progress} of 4` : 'In prison';
+    const slots = g.cases[s.id].map((c, i) => {
       if (c.status === 'public') return slotHTML(c.trait, `<span class="val pub">${esc(c.value)}</span><span class="hint">On the public record</span>`);
       if (c.status === 'mine') return slotHTML(c.trait, `<span class="val">${esc(c.value)}</span><span class="hint">You hold this</span>`);
       return slotHTML(c.trait, `<span class="redact" style="width:${45 + (c.cid * 37 + i * 11) % 45}%"></span><span class="hint">${seenText(c.seenWith)}</span>`);
     }).join('');
-  } else {
-    $('#caseTitle').textContent = 'Case notes';
-    $('#caseNotes').innerHTML = '<p class="empty">Tap a suspect at the table to see what you have on them.</p>';
-  }
+    return `<div class="case${s.id === ui.sel ? ' sel' : ''}${s.alive ? '' : ' dead'}">
+      <button class="case-head" data-case="${esc(s.id)}" ${s.alive ? '' : 'disabled'}><b>${esc(name)}</b><span class="count${s.canArrest ? ' hot' : ''}">${s.canArrest ? 'Ready to imprison' : count}</span></button>
+      ${slots}</div>`;
+  }).join('') || '<p class="empty">No other suspects.</p>';
+  $$('[data-case]').forEach(b => b.onclick = () => { ui.sel = b.dataset.case; renderGame(); tick(); });
 
   const logEl = $('#log');
   const atTop = logEl.scrollTop < 8;
-  logEl.innerHTML = g.log.slice().reverse().map(e => `<li class="${esc(e.kind)}">${esc(e.text)}</li>`).join('');
+  const fresh = Math.max(0, g.log.length - (ui.logLen == null ? g.log.length : ui.logLen));
+  ui.logLen = g.log.length;
+  logEl.innerHTML = g.log.slice().reverse().map((e, i) => `<li class="${esc(e.kind)}${i < fresh ? ' fresh' : ''}">${esc(e.text)}</li>`).join('');
   if (atTop) logEl.scrollTop = 0;
 }
 

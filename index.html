@@ -64,14 +64,15 @@
     <button class="linkbtn" data-leave>Leave</button>
   </div>
   <div class="layout">
-    <main>
+    <aside class="logcol">
+      <section class="box"><h2>What’s happened</h2><ol class="log" id="log"></ol></section>
+    </aside>
+    <main class="tablecol">
       <div class="tablewrap"><div class="table" id="table"></div></div>
     </main>
     <aside class="side">
       <section class="box"><h2>Your crime</h2><div id="myCrime"></div></section>
-      <section class="box"><h2>Clues you hold</h2><div class="hand" id="hand"></div></section>
-      <section class="box"><h2 id="caseTitle">Case notes</h2><div id="caseNotes"></div></section>
-      <section class="box"><h2>What’s happened</h2><ol class="log" id="log"></ol></section>
+      <section class="box"><h2>Case notes</h2><div id="caseNotes"></div></section>
     </aside>
   </div>
   <div class="actionbar"><div class="ab" id="actionbar"></div></div>
@@ -108,6 +109,7 @@
 </div>
 
 <div class="toast" id="toast" role="status" hidden></div>
+<div class="fx" id="fx" aria-hidden="true"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js"></script>
 <script src="config.js"></script>

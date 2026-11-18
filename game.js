@@ -180,7 +180,7 @@ class Room {
       shuffle(st[pid].secrets.slice()).slice(0, handSize - TRAITS.length)
         .forEach(id => cards.push({ id: cards.length, clue: id }));
     });
-    this.g = { order, st, clues, cards, handSize, pub: new Set(), turnIdx: 0, firstIdx: 0, round: 1, pending: null, log: [], end: null, deadline: null, waitingOn: null };
+    this.g = { order, st, clues, cards, handSize, pub: new Set(), events: [], eventSeq: 0, turnIdx: 0, firstIdx: 0, round: 1, pending: null, log: [], end: null, deadline: null, waitingOn: null };
     this.deal();
     const first = Math.floor(Math.random() * n);
     Object.assign(this.g, { turnIdx: first, firstIdx: first });
@@ -237,6 +237,9 @@ class Room {
   current() { return this.g.order[this.g.turnIdx]; }
   log(kind, fn) { if (!this.g) return; this.g.log.push({ kind, fn }); if (this.g.log.length > 300) this.g.log.shift(); }
   tag(pid, t) { this.S(pid).tag = t; }
+  // Table events tell clients what to animate (cards moving between seats). They carry
+  // who and how many, never which clue, so they reveal nothing the log doesn't.
+  event(e) { const g = this.g; g.events.push({ id: ++g.eventSeq, ...e }); if (g.events.length > 40) g.events.shift(); }
   everyone(f) { this.g.order.forEach(pid => f(this.S(pid))); }
   move(card, from, to) {
     if (this.ownerOfCard(card) === to) throw new Error('A player was about to receive their own clue');
@@ -304,6 +307,7 @@ class Room {
     this.S(a).hand.push(copy.id);
     this.S(t).know[clue] = a;
     const c = this.K(clue);
+    this.event({ type: 'copy', from: t, to: a });
     this.tag(a, 'Copied a clue');
     this.log('', v => v === a ? `You copy a random clue from ${this.name(t)}: ${this.lbl(clue, v)}, “${c.value}”.`
       : v === t ? `${this.name(a)} copies a random clue from you: ${this.lbl(clue, v)}, “${c.value}”. You keep your card.`
@@ -311,6 +315,7 @@ class Room {
     this.endTurn(a);
   }
   doDemand(a, t, about) {
+    this.event({ type: 'demand', from: a, to: t });
     this.tag(a, 'Made a demand');
     this.log('demand', v => `${this.nm(a, v)} ${this.vb(a, v, 'demand', 'demands')} a clue about ${this.pos(about, v)} crime from ${this.nm(t, v, false)}, threatening to leak a clue about ${t === v ? 'you' : 'them'}.`);
     if (!this.demandable(a, t, about).length) {
@@ -332,6 +337,7 @@ class Room {
       const card = rnd(options), clue = this.clueOf(card), c = this.K(clue);
       this.move(card, t, a);
       this.S(t).know[clue] = a;
+      this.event({ type: 'give', from: t, to: a });
       this.tag(t, 'Handed one over');
       this.log('', v => v === a ? `${this.name(t)} hands over ${this.lbl(clue, v)}: “${c.value}”.`
         : v === t ? `You hand over ${this.lbl(clue, v)} (“${c.value}”).`
@@ -339,6 +345,7 @@ class Room {
       return this.endTurn(a);
     }
     this.S(a).refusals++;
+    this.event({ type: 'refuse', from: t, to: a });
     this.tag(t, timedOut ? 'Timed out' : 'Refused');
     this.log('refuse', v => `${this.nm(t, v)} ${this.vb(t, v, 'refuse', 'refuses')}${timedOut ? ' (time ran out)' : ''}.`);
     const lev = this.leverage(a, t);
@@ -354,6 +361,7 @@ class Room {
       this.g.pub.add(clue);
       this.everyone(s => { delete s.know[clue]; });
       const c = this.K(clue);
+      this.event({ type: 'leak', from: a, to: 'public', value: c.value });
       this.tag(a, 'Leaked a clue');
       this.log('expose', v => `${this.nm(a, v)} ${this.vb(a, v, 'leak', 'leaks')} ${this.lbl(clue, v)}: “${c.value}”. It’s on the public record now.`);
     } else {
@@ -395,6 +403,8 @@ class Room {
     const taken = sx.hand.splice(0);
     this.everyone(s => taken.forEach(cd => { const c = this.clueOf(cd); if (s.know[c] === x) delete s.know[c]; }));
     const split = this.splitHand(taken, p, x);
+    this.event({ type: 'arrest', from: p, to: x });
+    for (const [pid, cds] of split) this.event({ type: 'deal', from: x, to: pid, n: cds.length });
     sx.tag = 'In prison';
     this.tag(p, 'Made an arrest');
     const n = taken.length, kept = (split.get(p) || []).length;
@@ -580,6 +590,7 @@ class Room {
         options: pd.type === 'follow' && pd.actor === v ? pd.options.map(clueInfo) : undefined,
         outThere: pd.type === 'respond' && pd.target === v ? me.secrets.filter(x => !g.pub.has(x)).length : undefined
       } : null,
+      events: g.events.slice(-20),
       log: g.log.slice(-100).map(e => ({ kind: e.kind, text: e.fn(v) })).filter(e => e.text),
       end: g.end
     };
