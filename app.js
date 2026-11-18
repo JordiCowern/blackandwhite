@@ -200,7 +200,58 @@ function renderGame() {
   renderBar(g);
   renderDecision(g);
   animateEvents(g);
+  measureBar();
 }
+function measureBar() {
+  const h = document.querySelector('.actionbar').offsetHeight;
+  if (h && h !== ui.barH) { ui.barH = h; document.documentElement.style.setProperty('--bar-h', `${h}px`); }
+}
+window.addEventListener('resize', measureBar);
+
+/* ---------- phone panel tabs ---------- */
+// On phones the tabs open and close a sheet over the table; on wider screens they
+// just switch which panel shows.
+const phone = window.matchMedia('(max-width: 920px)');
+function setTab(name, open) {
+  const lay = $('#layout');
+  if (phone.matches) {
+    const isOpen = lay.dataset.sheet === 'open';
+    if (open === undefined) open = !(isOpen && lay.dataset.mtab === name);
+    lay.dataset.sheet = open ? 'open' : '';
+  }
+  lay.dataset.mtab = name;
+  $$('.mtabs [data-mtab]').forEach(b => {
+    b.setAttribute('aria-selected', String(b.dataset.mtab === name && (!phone.matches || lay.dataset.sheet === 'open')));
+  });
+}
+$$('.mtabs [data-mtab]').forEach(b => b.onclick = () => setTab(b.dataset.mtab));
+
+/* ---------- color templates ---------- */
+const PALETTES = [
+  { id: '', name: 'Interrogation', note: 'Follows your device’s light or dark mode', table: '#323a4a', rim: '#1f2531', a: '#a8261b', b: '#2f5d50' },
+  { id: 'midnight', name: 'Midnight', table: '#1b2a4a', rim: '#0a1020', a: '#ff7a59', b: '#5fd0b0' },
+  { id: 'evidence', name: 'Evidence board', table: '#7f5536', rim: '#4f3220', a: '#b3261e', b: '#2e6b5a' },
+  { id: 'noir', name: 'Noir', table: '#1d1d1d', rim: '#000000', a: '#e0393e', b: '#d6d6d6' },
+  { id: 'neon', name: 'Neon', table: '#24104a', rim: '#0b0518', a: '#ff3d8b', b: '#2de2e6' },
+  { id: 'daylight', name: 'Daylight', table: '#2f4b7c', rim: '#1c2f52', a: '#d1495b', b: '#2a7f62' }
+];
+function currentPalette() { return document.documentElement.dataset.palette || ''; }
+function setPalette(id) {
+  if (id) document.documentElement.dataset.palette = id; else delete document.documentElement.dataset.palette;
+  try { id ? localStorage.setItem('leverage:palette', id) : localStorage.removeItem('leverage:palette'); } catch {}
+  renderSwatches();
+}
+function renderSwatches() {
+  const cur = currentPalette();
+  $('#swatches').innerHTML = PALETTES.map(p => `
+    <button class="swatch" data-palette="${p.id}" aria-pressed="${p.id === cur}" title="${esc(p.note || p.name)}">
+      <span class="preview" style="background:${p.table};border-color:${p.rim}"><i style="background:${p.a}"></i><i style="background:${p.b}"></i></span>
+      ${esc(p.name)}
+    </button>`).join('');
+  $$('#swatches [data-palette]').forEach(b => b.onclick = () => setPalette(b.dataset.palette));
+}
+$$('[data-colors]').forEach(b => b.onclick = () => { renderSwatches(); $('#colors').hidden = false; $('#colorsClose').focus(); });
+$('#colorsClose').onclick = () => { $('#colors').hidden = true; };
 /* ---------- animations ---------- */
 // The host sends a short list of table events (who gave a card to whom). New ones play
 // as cards flying between seats, drawn on a layer above the page so re-rendering the
@@ -304,6 +355,7 @@ function renderTable(g) {
   t.querySelectorAll('button.seat').forEach(b => b.onclick = () => {
     const id = b.dataset.pid;
     ui.sel = ui.sel === id ? null : id;
+    if (ui.sel) setTab('notes', phone.matches ? $('#layout').dataset.sheet === 'open' : undefined);
     renderGame(); tick();
   });
 }
@@ -344,23 +396,22 @@ function renderSide(g) {
     return slotHTML(c.trait, `<span class="val">${esc(c.value)}</span><span class="hint">${where}</span>`);
   }).join('');
 
-  // Case notes on every suspect; the one you've tapped comes first. Tapping a heading
-  // selects that suspect, like tapping their seat.
-  const others = g.seats.filter(s => s.id !== me());
-  const ordered = [...others.filter(s => s.id === ui.sel), ...others.filter(s => s.id !== ui.sel && s.alive), ...others.filter(s => s.id !== ui.sel && !s.alive)];
-  $('#caseNotes').innerHTML = ordered.map(s => {
-    const name = pinfo(s.id).name;
-    const count = s.alive ? `${s.progress} of 4` : 'In prison';
-    const slots = g.cases[s.id].map((c, i) => {
+  // Case notes show only the suspect you've tapped, so the panel never needs scrolling.
+  const sel = ui.sel ? g.seats.find(s => s.id === ui.sel) : null;
+  if (sel) {
+    const name = pinfo(sel.id).name;
+    $('#notesTitle').textContent = `Case notes on ${name}`;
+    const status = sel.canArrest ? '<p class="case-status hot">You have every clue. Press Imprison above their seat.</p>'
+      : `<p class="case-status">You have ${sel.progress} of 4 clues on ${esc(name)}’s crime.</p>`;
+    $('#caseNotes').innerHTML = status + g.cases[sel.id].map((c, i) => {
       if (c.status === 'public') return slotHTML(c.trait, `<span class="val pub">${esc(c.value)}</span><span class="hint">On the public record</span>`);
       if (c.status === 'mine') return slotHTML(c.trait, `<span class="val">${esc(c.value)}</span><span class="hint">You hold this</span>`);
       return slotHTML(c.trait, `<span class="redact" style="width:${45 + (c.cid * 37 + i * 11) % 45}%"></span><span class="hint">${seenText(c.seenWith)}</span>`);
     }).join('');
-    return `<div class="case${s.id === ui.sel ? ' sel' : ''}${s.alive ? '' : ' dead'}">
-      <button class="case-head" data-case="${esc(s.id)}" ${s.alive ? '' : 'disabled'}><b>${esc(name)}</b><span class="count${s.canArrest ? ' hot' : ''}">${s.canArrest ? 'Ready to imprison' : count}</span></button>
-      ${slots}</div>`;
-  }).join('') || '<p class="empty">No other suspects.</p>';
-  $$('[data-case]').forEach(b => b.onclick = () => { ui.sel = b.dataset.case; renderGame(); tick(); });
+  } else {
+    $('#notesTitle').textContent = 'Case notes';
+    $('#caseNotes').innerHTML = '<p class="empty">Tap a suspect at the table to see what you have on them.</p>';
+  }
 
   const logEl = $('#log');
   const atTop = logEl.scrollTop < 8;

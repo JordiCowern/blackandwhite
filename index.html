@@ -10,6 +10,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;700;800&family=Courier+Prime:wght@400;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="style.css">
+<script>try { var p = localStorage.getItem('leverage:palette'); if (p) document.documentElement.dataset.palette = p; } catch (e) {}</script>
 </head>
 <body data-screen="home">
 
@@ -35,6 +36,7 @@
     </div>
     <p class="form-error" id="homeError" role="alert"></p>
     <button class="linkbtn" data-rules>How to play</button>
+    <button class="linkbtn" data-colors>Colors</button>
   </div>
 </section>
 
@@ -50,6 +52,7 @@
     <p class="lobby-note" id="hostNote" hidden>The room runs in your browser, so keep this page open until the game ends. If you close it, the room closes for everyone.</p>
     <div class="lobby-foot">
       <button class="linkbtn" data-rules>How to play</button>
+    <button class="linkbtn" data-colors>Colors</button>
       <button class="linkbtn" data-leave>Leave room</button>
     </div>
   </div>
@@ -61,9 +64,15 @@
     <span class="wordmark small">Leverage</span>
     <div class="status" id="status" aria-live="polite"></div>
     <button class="linkbtn" data-rules>How to play</button>
+    <button class="linkbtn" data-colors>Colors</button>
     <button class="linkbtn" data-leave>Leave</button>
   </div>
-  <div class="layout">
+  <div class="layout" id="layout" data-mtab="notes" data-sheet="">
+    <div class="mtabs" role="tablist" aria-label="Panels">
+      <button role="tab" data-mtab="notes" aria-selected="true">Case notes</button>
+      <button role="tab" data-mtab="crime" aria-selected="false">Your crime</button>
+      <button role="tab" data-mtab="log" aria-selected="false">Log</button>
+    </div>
     <aside class="logcol">
       <section class="box"><h2>What’s happened</h2><ol class="log" id="log"></ol></section>
     </aside>
@@ -71,8 +80,8 @@
       <div class="tablewrap"><div class="table" id="table"></div></div>
     </main>
     <aside class="side">
-      <section class="box"><h2>Your crime</h2><div id="myCrime"></div></section>
-      <section class="box"><h2>Case notes</h2><div id="caseNotes"></div></section>
+      <section class="box" id="crimeBox"><h2>Your crime</h2><div id="myCrime"></div></section>
+      <section class="box" id="notesBox"><h2 id="notesTitle">Case notes</h2><div id="caseNotes"></div></section>
     </aside>
   </div>
   <div class="actionbar"><div class="ab" id="actionbar"></div></div>
@@ -89,6 +98,15 @@
 </div>
 
 <!-- Rules -->
+<div class="overlay" id="colors" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="cTitle">
+    <h3 id="cTitle">Colors</h3>
+    <p class="muted">Only changes how the game looks on this device.</p>
+    <div class="swatches" id="swatches"></div>
+    <button class="btn" id="colorsClose">Done</button>
+  </div>
+</div>
+
 <div class="overlay" id="rules" hidden>
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="rTitle">
     <h3 id="rTitle">How to play</h3>
