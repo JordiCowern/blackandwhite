@@ -148,7 +148,7 @@ class Room {
         break;
       }
       case 'random': this.cmdRandom(pid, msg.target); break;
-      case 'demand': this.cmdDemand(pid, msg.target, msg.clue); break;
+      case 'demand': this.cmdDemand(pid, msg.target, msg.about); break;
       case 'pass': this.requireTurn(pid); this.pass(pid, false); break;
       case 'respond': this.cmdRespond(pid, !!msg.comply); break;
       case 'follow': this.cmdFollow(pid, msg.clue); break;
@@ -227,6 +227,10 @@ class Room {
   takeable(a, t) {
     return this.S(t).hand.filter(cd => { const c = this.clueOf(cd); return this.K(c).owner !== a && !this.holds(a, c) && !this.g.pub.has(c); });
   }
+  // Cards the target could hand over for a demand about `about`'s crime.
+  demandable(a, t, about) {
+    return this.S(t).hand.filter(cd => { const c = this.clueOf(cd); return this.K(c).owner === about && !this.holds(a, c) && !this.g.pub.has(c); });
+  }
   canArrest(p, x) { return p !== x && this.S(p).alive && this.S(x).alive && this.S(x).secrets.every(c => this.has(p, c)); }
   leverage(a, t) { return [...new Set(this.S(a).hand.map(cd => this.clueOf(cd)).filter(c => this.K(c).owner === t && !this.g.pub.has(c)))]; }
   alive() { return this.g.order.filter(pid => this.S(pid).alive); }
@@ -254,15 +258,18 @@ class Room {
     if (!this.takeable(pid, t).length) throw userError('They aren’t holding anything new you can copy.');
     this.doRandom(pid, t);
   }
-  cmdDemand(pid, t, clue) {
+  // A demand names whose crime it's about, not a specific clue: "give me something on
+  // Mott's crime." The target hands over a random clue about that crime that the
+  // demander doesn't have yet.
+  cmdDemand(pid, t, about) {
     this.requireTurn(pid); this.requireTarget(pid, t);
-    const id = Number(clue);
-    const c = Number.isInteger(id) ? this.g.clues[id] : undefined;
-    if (!c) throw userError('You can’t demand that clue.');
-    if (c.owner === pid) throw userError('You can’t demand a clue about your own crime.');
-    if (c.owner === t) throw userError('Nobody ever holds a clue about their own crime.');
-    if (this.has(pid, id) || !this.S(c.owner).alive) throw userError('You can’t demand that clue.');
-    this.doDemand(pid, t, id);
+    const o = this.g.st[about];
+    if (!o) throw userError('Pick whose crime you want a clue about.');
+    if (about === pid) throw userError('You can’t demand clues about your own crime.');
+    if (about === t) throw userError('Nobody ever holds clues about their own crime.');
+    if (!o.alive) throw userError('That suspect is already in prison.');
+    if (this.S(about).secrets.every(c => this.has(pid, c))) throw userError(`You already have every clue on ${this.name(about)}’s crime.`);
+    this.doDemand(pid, t, about);
   }
   cmdRespond(pid, comply) {
     const pd = this.g && this.g.pending;
@@ -303,34 +310,40 @@ class Room {
       : `${this.name(a)} copies a random clue from ${this.name(t)}.`);
     this.endTurn(a);
   }
-  doDemand(a, t, clue) {
+  doDemand(a, t, about) {
     this.tag(a, 'Made a demand');
-    this.log('demand', v => `${this.nm(a, v)} ${this.vb(a, v, 'demand', 'demands')} ${this.lbl(clue, v)} from ${this.nm(t, v, false)}, threatening to leak a clue about ${t === v ? 'you' : 'them'}.`);
-    if (!this.holds(t, clue)) {
-      this.tag(t, 'Didn’t have it');
-      this.log('', v => `${this.nm(t, v)} ${this.vb(t, v, 'don’t', 'doesn’t')} have it.`);
-      this.everyone(s => { if (s.know[clue] === t) delete s.know[clue]; });
+    this.log('demand', v => `${this.nm(a, v)} ${this.vb(a, v, 'demand', 'demands')} a clue about ${this.pos(about, v)} crime from ${this.nm(t, v, false)}, threatening to leak a clue about ${t === v ? 'you' : 'them'}.`);
+    if (!this.demandable(a, t, about).length) {
+      this.tag(t, 'Had nothing new');
+      this.log('', v => `${this.nm(t, v)} ${this.vb(t, v, 'have', 'has')} nothing new on ${this.pos(about, v)} crime for ${a === v ? 'you' : 'them'}.`);
       return this.endTurn(a);
     }
-    this.g.pending = { type: 'respond', actor: a, target: t, clue };
+    this.g.pending = { type: 'respond', actor: a, target: t, about };
     this.bump();
   }
   resolveRespond(comply, timedOut) {
-    const { actor: a, target: t, clue } = this.g.pending;
+    const { actor: a, target: t, about } = this.g.pending;
     if (comply) {
-      this.move(this.cardFor(t, clue), t, a);
-      this.everyone(s => { s.know[clue] = a; });
-      this.tag(t, 'Handed it over');
-      this.log('', v => `${this.nm(t, v)} ${this.vb(t, v, 'hand', 'hands')} it over.`);
+      const options = this.demandable(a, t, about);
+      if (!options.length) { // an arrest elsewhere changed the hands mid-demand
+        this.log('', v => `${this.nm(t, v)} no longer ${this.vb(t, v, 'have', 'has')} anything new to hand over.`);
+        return this.endTurn(a);
+      }
+      const card = rnd(options), clue = this.clueOf(card), c = this.K(clue);
+      this.move(card, t, a);
+      this.S(t).know[clue] = a;
+      this.tag(t, 'Handed one over');
+      this.log('', v => v === a ? `${this.name(t)} hands over ${this.lbl(clue, v)}: “${c.value}”.`
+        : v === t ? `You hand over ${this.lbl(clue, v)} (“${c.value}”).`
+        : `${this.name(t)} hands over a clue.`);
       return this.endTurn(a);
     }
-    this.everyone(s => { s.know[clue] = t; });
     this.S(a).refusals++;
     this.tag(t, timedOut ? 'Timed out' : 'Refused');
     this.log('refuse', v => `${this.nm(t, v)} ${this.vb(t, v, 'refuse', 'refuses')}${timedOut ? ' (time ran out)' : ''}.`);
     const lev = this.leverage(a, t);
     if (!lev.length) { this.backDown(a, t, true, false); return this.endTurn(a); }
-    this.g.pending = { type: 'follow', actor: a, target: t, clue, options: lev };
+    this.g.pending = { type: 'follow', actor: a, target: t, about, options: lev };
     this.bump();
   }
   resolveFollow(clue, timedOut) {
@@ -397,7 +410,7 @@ class Room {
     }
     if (this.checkEnd()) return;
     const pd = g.pending;
-    const cancelled = !!pd && (pd.actor === x || pd.target === x);
+    const cancelled = !!pd && (pd.actor === x || pd.target === x || pd.about === x);
     if (cancelled) { g.pending = null; this.log('', () => 'The demand is called off.'); }
     if (cancelled || this.current() === x) this.advance(); // the interrupted turn ends
   }
@@ -454,7 +467,7 @@ class Room {
     if (pd && pd.type === 'respond') {
       who = pd.target; ms = LIMITS.RESPOND_MS;
       onTimeout = () => this.resolveRespond(false, true);
-      botAct = () => this.resolveRespond(this.botRespond(pd.target, pd.actor, pd.clue), false);
+      botAct = () => this.resolveRespond(this.botRespond(pd.target, pd.actor, pd.about), false);
     } else if (pd && pd.type === 'follow') {
       who = pd.actor; ms = LIMITS.FOLLOW_MS;
       onTimeout = () => this.resolveFollow(null, true);
@@ -482,13 +495,11 @@ class Room {
   }
 
   /* ---------- bots ---------- */
-  botRespond(t, a, clue) {
-    const c = this.K(clue), ownerAlive = this.S(c.owner).alive;
+  botRespond(t, a, about) {
+    const ownerAlive = this.S(about).alive;
     let cost = ownerAlive ? 1.2 : 0.2;
-    if (ownerAlive) {
-      const after = this.S(c.owner).secrets.filter(x => x === clue || this.has(a, x)).length;
-      if (after === 4) cost += 0.6;
-    }
+    // Handing over the last clue the demander needs would let them imprison someone.
+    if (ownerAlive && this.S(about).secrets.filter(x => !this.has(a, x)).length === 1) cost += 0.6;
     const st = this.S(t), sa = this.S(a);
     const outThere = st.secrets.filter(x => !this.g.pub.has(x)).length;
     const othersCards = this.g.order.filter(p => p !== t).reduce((s, p) => s + this.S(p).hand.length, 0) || 1;
@@ -513,17 +524,17 @@ class Room {
     if (best) {
       const missing = this.S(best).secrets.filter(c => !this.has(b, c));
       const located = missing.filter(locatedAt);
-      if (located.length) { const c = rnd(located); return this.botDemandOrTake(b, s.know[c], c); }
-      const holders = others.filter(p => p !== best);
-      if (missing.length && holders.length && Math.random() < 0.3) return this.doDemand(b, rnd(holders), rnd(missing));
+      if (located.length) { const c = rnd(located); return this.botDemandOrTake(b, s.know[c], best); }
+      const holders = others.filter(p => p !== best && this.S(p).hand.length);
+      if (holders.length && Math.random() < 0.3) return this.doDemand(b, rnd(holders), best);
     }
     const withCards = others.filter(p => this.takeable(b, p).length);
     if (!withCards.length) return this.pass(b, false);
     this.doRandom(b, rnd(withCards.flatMap(p => Array(this.takeable(b, p).length).fill(p))));
   }
-  botDemandOrTake(b, y, c) {
+  botDemandOrTake(b, y, about) {
     const lev = this.leverage(b, y).length;
-    if (lev || Math.random() < 0.45 || !this.takeable(b, y).length) return this.doDemand(b, y, c);
+    if (lev || Math.random() < 0.45 || !this.takeable(b, y).length) return this.doDemand(b, y, about);
     return this.doRandom(b, y);
   }
 
@@ -565,7 +576,7 @@ class Room {
       })])),
       pending: pd ? {
         type: pd.type, actor: pd.actor, target: pd.target,
-        clue: { cid: pd.clue, owner: this.K(pd.clue).owner, trait: this.K(pd.clue).trait },
+        about: pd.about,
         options: pd.type === 'follow' && pd.actor === v ? pd.options.map(clueInfo) : undefined,
         outThere: pd.type === 'respond' && pd.target === v ? me.secrets.filter(x => !g.pub.has(x)).length : undefined
       } : null,

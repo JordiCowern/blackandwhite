@@ -73,8 +73,11 @@ seats. Any static file server works for running it locally, for example
 - On your turn, pick a suspect and either:
   - **copy a random clue** from them: they keep their card and you get a duplicate (only
     clues you don't already have and that aren't public), or
-  - **demand a specific clue**, threatening to leak a clue about them. If they hand it
-    over, it leaves their hand. If they refuse, you can leak a clue you hold about them
+  - **demand a clue about someone else's crime** (for example, "give me something on
+    Mott"), threatening to leak a clue about them. You name the suspect, not a specific
+    clue. If they hand one over, you get a random clue they hold on that crime that you
+    don't have yet, and it leaves their hand. If they hold nothing new on that crime,
+    the demand fails. If they refuse, you can leak a clue you hold about them
     onto the public record, or back down. With nothing on them you back down
     automatically, and nobody can tell the difference.
   - or pass.

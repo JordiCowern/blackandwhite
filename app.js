@@ -289,15 +289,13 @@ function renderSide(g) {
   if (atTop) logEl.scrollTop = 0;
 }
 
+// Demands name a suspect, not a clue: the target hands over a random clue on that
+// suspect's crime that you don't have yet.
 function demandOptions(g) {
-  const groups = [];
-  // Nobody holds clues about their own crime, so the target's own clues aren't offered.
-  g.seats.filter(s => s.alive && s.id !== me() && s.id !== ui.sel).forEach(s => {
-    const items = g.cases[s.id].filter(c => c.status === 'hidden');
-    if (items.length) groups.push({ label: `Clues on ${pinfo(s.id).name}’s crime`, owner: s.id, items });
-  });
-  return groups.map(gr => `<optgroup label="${esc(gr.label)}">${gr.items.map(c =>
-    `<option value="${c.cid}">${esc(clueLabel(gr.owner, c.trait).replace(/^./, x => x.toUpperCase()))}${c.seenWith ? ` (last seen with ${c.seenWith === me() ? 'you' : esc(pinfo(c.seenWith).name)})` : ''}</option>`).join('')}</optgroup>`).join('');
+  return g.seats
+    .filter(s => s.alive && s.id !== me() && s.id !== ui.sel && s.progress < 4) // nobody holds their own clues
+    .map(s => `<option value="${esc(s.id)}">A clue on ${esc(pinfo(s.id).name)}’s crime (you have ${s.progress} of 4)</option>`)
+    .join('');
 }
 
 function renderBar(g) {
@@ -327,7 +325,7 @@ function renderBar(g) {
   let info;
   if (pd && pd.type === 'respond') {
     info = pd.target === me() ? `<b>${esc(pinfo(pd.actor).name)} is making a demand</b><span>Answer it in the window that’s open.</span>`
-      : `<b>Waiting on ${esc(pname(pd.target))}</b><span>${esc(pname(pd.actor))} demanded ${esc(clueLabel(pd.clue.owner, pd.clue.trait))}. ${clock(g.deadline)}</span>`;
+      : `<b>Waiting on ${esc(pname(pd.target))}</b><span>${esc(pname(pd.actor))} demanded a clue about ${esc(possessive(pd.about))} crime. ${clock(g.deadline)}</span>`;
   } else if (pd && pd.type === 'follow') {
     info = pd.actor === me() ? `<b>They refused</b><span>Decide whether to leak a clue in the window that’s open.</span>`
       : `<b>Waiting on ${esc(pname(pd.actor))}</b><span>${esc(pname(pd.target))} refused. Will ${esc(pname(pd.actor))} follow through? ${clock(g.deadline)}</span>`;
@@ -349,7 +347,7 @@ function renderBar(g) {
   const opts = can ? demandOptions(g) : '';
   bar.innerHTML = `<div class="ab-info">${info}</div>
     <div class="ab-controls">
-      <select id="demandSel" aria-label="Clue to demand" ${can && opts ? '' : 'disabled'}>${opts || '<option>Choose a clue to demand</option>'}</select>
+      <select id="demandSel" aria-label="Whose crime to demand a clue about" ${can && opts ? '' : 'disabled'}>${opts || '<option>Demand a clue about someone’s crime</option>'}</select>
       <button class="act demand" id="demBtn" ${can && opts ? '' : 'disabled'}>Demand</button>
       <button class="act" id="randBtn" ${can && tSeat && tSeat.takeable ? '' : 'disabled'}>Copy random</button>
       <button class="act ghost" id="passBtn" ${myTurn ? '' : 'disabled'}>Pass</button>
@@ -357,7 +355,7 @@ function renderBar(g) {
   const sel = $('#demandSel');
   if (ui.demand != null && [...sel.options].some(o => o.value === ui.demand)) sel.value = ui.demand;
   sel.onchange = () => { ui.demand = sel.value; };
-  $('#demBtn').onclick = () => { ui.demand = null; act('demand', { target: t, clue: Number(sel.value) }); };
+  $('#demBtn').onclick = () => { ui.demand = null; act('demand', { target: t, about: sel.value }); };
   $('#randBtn').onclick = () => act('random', { target: t });
   $('#passBtn').onclick = () => act('pass');
 }
@@ -365,8 +363,8 @@ function renderBar(g) {
 function renderDecision(g) {
   const pd = state.phase === 'playing' ? g.pending : null;
   let key = null;
-  if (pd && pd.type === 'respond' && pd.target === me()) key = `r:${pd.actor}:${pd.clue.cid}:${g.round}:${g.turn}`;
-  if (pd && pd.type === 'follow' && pd.actor === me()) key = `f:${pd.target}:${pd.clue.cid}:${g.round}:${g.turn}`;
+  if (pd && pd.type === 'respond' && pd.target === me()) key = `r:${pd.actor}:${pd.about}:${g.round}:${g.turn}`;
+  if (pd && pd.type === 'follow' && pd.actor === me()) key = `f:${pd.target}:${pd.about}:${g.round}:${g.turn}`;
   const box = $('#decision');
   $('#dTimer').dataset.deadline = g.deadline || '';
   if (!key) { box.hidden = true; ui.modalKey = null; return; }
@@ -383,9 +381,10 @@ function renderDecision(g) {
   };
   if (pd.type === 'respond') {
     const from = pinfo(pd.actor).name;
-    $('#dTitle').textContent = `${from} wants ${clueLabel(pd.clue.owner, pd.clue.trait)}`;
-    $('#dBody').textContent = `Hand it over, or refuse and risk ${from} leaking a clue about your crime. ${pd.outThere} of your clues ${pd.outThere === 1 ? 'is' : 'are'} somewhere out there, so ${from} may or may not be bluffing.`;
-    add('Hand it over', '', () => act('respond', { comply: true }));
+    const whose = pinfo(pd.about).name;
+    $('#dTitle').textContent = `${from} wants a clue about ${whose}’s crime`;
+    $('#dBody').textContent = `If you hand one over, ${from} gets a random clue you hold about ${whose}’s crime that they don’t have yet. Refuse, and you risk ${from} leaking a clue about your crime. ${pd.outThere} of your clues ${pd.outThere === 1 ? 'is' : 'are'} somewhere out there, so ${from} may or may not be bluffing.`;
+    add('Hand one over', '', () => act('respond', { comply: true }));
     add('Refuse', 'ghost', () => act('respond', { comply: false }));
   } else {
     const who = pinfo(pd.target).name;
